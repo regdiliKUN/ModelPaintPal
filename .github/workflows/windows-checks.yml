@@ -1,0 +1,23 @@
+name: Windows checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  verify:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src/ModelPaintPal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: src/ModelPaintPal/requirements-lock.txt
+      - run: python -m pip install -r requirements-lock.txt
+      - run: New-Item -ItemType File -Path portable.marker -Force
+      - run: python -m pyflakes app scripts tests run.py
+      - run: python -m unittest discover -s tests
+      - run: python scripts/check_paint_db.py

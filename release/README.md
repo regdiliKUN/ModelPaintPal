@@ -1,41 +1,12 @@
-# 发行包 · ModelPaintPal
+# ModelPaintPal Windows x64 发布包
 
-本目录存放 **ModelPaintPal** 的 Windows x64 可运行包体（由桌面快捷方式实际指向的安装/发布目录整理而来）。
-
-| 项目 | 内容 |
+| 版本 | 发布目录 |
 | --- | --- |
-| 版本 | `2026.10.24` |
-| 平台 | Windows x64 |
-| 包体路径 | `release/2026.10.24/ModelPaintPal-2026.10.24-win-x64/` |
-| 文件数 | 287 |
-| 体积 | 约 135.4 MB |
+| 1.1.0 / 2026.10.25 | `release/2026.10.25/ModelPaintPal-1.1.0-win-x64/` |
+| 2026.10.24（旧版保留） | `release/2026.10.24/ModelPaintPal-2026.10.24-win-x64/` |
 
-## 运行方式
+推荐从GitHub Releases下载便携版ZIP，解压后保留整个文件夹并运行`ModelPaintPal.exe`。
+这些发布目录不含用户配置、历史、收藏或校准。
 
-双击 `ModelPaintPal.exe`
-
-## 校验完整性
-
-```bash
-cd release
-sha256sum -c SHA256SUMS.txt
-```
-
-Windows PowerShell：
-
-```powershell
-Get-Content release\SHA256SUMS.txt | ForEach-Object {
-  $h, $p = $_ -split '  ', 2
-  if ((Get-FileHash $p -Algorithm SHA256).Hash -ne $h.ToUpper()) { "MISMATCH $p" }
-}
-```
-
-## 关于 ModelPaintPal
-
-手办涂装配色助手（便携版）。
-
-## 未纳入的内容
-
-本地用户数据 `userdata/`、`userdata_backup_20261022/` 未纳入。
-
-以上目录属于开发环境、运行期缓存或大体积模型权重，不影响程序本体运行。
+在仓库根目录执行`sha256sum -c release/SHA256SUMS.txt`可核对所有发布文件。
+发布目录按原始字节入库，不进行换行转换。

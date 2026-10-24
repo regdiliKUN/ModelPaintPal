@@ -1,0 +1,4 @@
+*.md text eol=lf
+src/** text=auto eol=lf
+release/20*/** binary
+release/SHA256SUMS.txt text eol=lf

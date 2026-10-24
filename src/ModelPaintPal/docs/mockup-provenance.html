@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ModelPaintPal · 数据可追溯性界面设计稿</title>
+<style>
+  :root{
+    --bg:#12141A; --bg-alt:#171A21; --surface:#1E222B; --surface-alt:#252A35;
+    --border:#2E3440; --border-strong:#3C4453;
+    --text:#E6E9EF; --dim:#9AA4B5; --faint:#6B7482;
+    --accent:#4C8DFF; --accent-dim:#2F5FB8;
+    --success:#3FB950; --warn:#D29922; --danger:#F85149; --highlight:#56A8F5;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:28px 32px 60px;
+    background:var(--bg); color:var(--text);
+    font-family:"Microsoft YaHei UI","Microsoft YaHei","PingFang SC",sans-serif;
+    font-size:13px; line-height:1.6;
+  }
+  h1{font-size:19px; margin:0 0 4px; font-weight:600}
+  .sub{color:var(--dim); font-size:12px; margin-bottom:26px}
+  h2{
+    font-size:13px; margin:34px 0 12px; font-weight:600; color:var(--text);
+    display:flex; align-items:center; gap:8px;
+  }
+  h2::before{
+    content:""; width:3px; height:13px; background:var(--accent); border-radius:2px;
+  }
+  .note{color:var(--dim); font-size:12px; margin:0 0 14px; max-width:900px}
+  .stage{display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start}
+
+  /* ---------- 卡片 ---------- */
+  .card{
+    width:520px; background:var(--surface); border:1px solid var(--border);
+    border-radius:10px; padding:14px;
+  }
+  .card + .card{background:var(--bg-alt)}
+  .row{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+  .badge{
+    background:var(--success); color:#10131A; font-size:11px; font-weight:700;
+    border-radius:9px; padding:2px 9px;
+  }
+  .title{font-size:14px; font-weight:600}
+  .chip{
+    background:var(--surface-alt); border:1px solid var(--border);
+    color:var(--dim); border-radius:9px; padding:2px 8px; font-size:11px;
+  }
+  .chip.ok{color:var(--success); border-color:rgba(63,185,80,.35)}
+  .chip.warn{color:var(--warn); border-color:rgba(210,153,34,.35)}
+  .chip.info{color:var(--accent); border-color:rgba(76,141,255,.35)}
+  .chip.infer{
+    color:var(--dim); border-style:dashed; border-color:var(--border-strong);
+    font-style:italic;
+  }
+  /* 引用角标 */
+  .cite{
+    display:inline-flex; align-items:center; justify-content:center;
+    min-width:14px; height:14px; padding:0 3px;
+    background:var(--accent-dim); color:#DCE7FF;
+    border-radius:4px; font-size:9px; font-weight:700;
+    vertical-align:super; margin-left:2px; cursor:pointer;
+  }
+  .cite.weak{background:#4A4030; color:#E8C88A}
+  .cite:hover{background:var(--accent)}
+
+  .subtitle{color:var(--dim); font-size:11px; margin-top:5px}
+  .dim{color:var(--dim)} .faint{color:var(--faint); font-size:11px}
+
+  /* ΔE 刻度尺 */
+  .gauge{margin:10px 0 4px}
+  .gauge-bar{display:flex; height:8px; border-radius:4px; overflow:hidden}
+  .gauge-bar i{flex:1}
+  .gauge-scale{display:flex; justify-content:space-between; color:var(--faint); font-size:9px; margin-top:3px}
+  .gauge-mark{position:relative;height:0}
+  .gauge-mark span{
+    position:absolute; top:-13px; transform:translateX(-50%);
+    color:var(--text); font-size:9px;
+  }
+
+  /* 色卡条 */
+  .strip{display:flex; gap:6px; margin:10px 0}
+  .sw{
+    flex:1; border-radius:6px; border:1px solid var(--border);
+    overflow:hidden; position:relative;
+  }
+  .sw .fill{height:44px}
+  .sw .meta{padding:3px 5px; font-size:10px; background:var(--surface-alt)}
+  .sw .meta b{display:block; font-size:10px}
+  .sw .de{
+    position:absolute; top:3px; right:3px; background:rgba(0,0,0,.55);
+    color:#fff; font-size:9px; border-radius:4px; padding:0 4px;
+  }
+
+  /* 比例条 */
+  .ratio{margin:8px 0}
+  .rbar{display:flex; height:22px; border-radius:5px; overflow:hidden}
+  .rseg{display:flex; align-items:center; justify-content:center; font-size:10px; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.6)}
+  .rlegend{color:var(--dim); font-size:11px; margin-top:4px}
+
+  .usage{display:flex; gap:6px; flex-wrap:wrap; margin:8px 0}
+  .alt{font-size:11px; color:var(--dim); margin:8px 0}
+  .alt li{margin-bottom:3px}
+  .alt ul{margin:4px 0 0; padding-left:16px}
+
+  .actions{display:flex; gap:6px; margin-top:10px}
+  button{
+    font-family:inherit; font-size:11px; padding:5px 11px; border-radius:6px;
+    border:1px solid var(--border-strong); background:var(--surface-alt);
+    color:var(--text); cursor:pointer;
+  }
+  button.primary{background:var(--accent); border-color:var(--accent); color:#0B1020; font-weight:600}
+
+  /* ---------- 来源区 ---------- */
+  .prov{
+    margin-top:10px; border:1px solid var(--border); border-radius:8px;
+    background:var(--bg-alt); overflow:hidden;
+  }
+  .prov-head{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:7px 10px; cursor:pointer; font-size:11px; color:var(--dim);
+  }
+  .prov-body{padding:0 10px 10px; border-top:1px solid var(--border)}
+  .src{display:flex; gap:8px; padding:7px 0; border-bottom:1px dashed var(--border)}
+  .src:last-child{border-bottom:none}
+  .src .n{
+    flex:0 0 16px; height:16px; border-radius:4px; background:var(--accent-dim);
+    color:#DCE7FF; font-size:9px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; margin-top:2px;
+  }
+  .src .n.weak{background:#4A4030; color:#E8C88A}
+  .src .txt{flex:1; min-width:0}
+  .src .nm{font-size:11.5px}
+  .src .url{color:var(--accent); font-size:10.5px; text-decoration:none; word-break:break-all}
+  .src .meta-line{color:var(--faint); font-size:10px; margin-top:2px}
+  .grp-title{font-size:10.5px; color:var(--faint); padding:9px 0 3px; letter-spacing:.5px}
+
+  /* ---------- 核实抽屉 ---------- */
+  .drawer{
+    width:420px; background:var(--surface); border:1px solid var(--border);
+    border-radius:10px; padding:14px;
+  }
+  .dtitle{font-size:13px; font-weight:600; margin-bottom:2px}
+  .verify-row{
+    display:flex; align-items:center; gap:8px; padding:8px 0;
+    border-bottom:1px dashed var(--border); font-size:11.5px;
+  }
+  .verify-row:last-of-type{border-bottom:none}
+  .st{
+    font-size:9.5px; padding:1px 6px; border-radius:4px; flex:0 0 auto;
+  }
+  .st.ok{background:rgba(63,185,80,.16); color:var(--success)}
+  .st.timeout{background:rgba(210,153,34,.16); color:var(--warn)}
+  .st.limit{background:rgba(210,153,34,.16); color:var(--warn)}
+  .st.parse{background:rgba(248,81,73,.16); color:var(--danger)}
+  .swatch-dot{width:16px; height:16px; border-radius:3px; border:1px solid var(--border-strong); flex:0 0 auto}
+  .ms{color:var(--faint); font-size:10px; margin-left:auto; flex:0 0 auto}
+  .fallback{
+    margin-top:10px; padding:9px 10px; border-radius:7px; font-size:11px;
+    background:rgba(210,153,34,.10); border:1px solid rgba(210,153,34,.30);
+    color:#E8C88A;
+  }
+  .verdict{
+    margin-top:10px; padding:9px 10px; border-radius:7px; font-size:11px;
+    background:rgba(76,141,255,.10); border:1px solid rgba(76,141,255,.30);
+  }
+
+  .annot{
+    width:300px; font-size:11.5px; color:var(--dim);
+    border-left:2px solid var(--border-strong); padding-left:12px;
+  }
+  .annot b{color:var(--text); display:block; margin-bottom:4px; font-size:12px}
+  .annot p{margin:0 0 8px}
+  code{background:var(--surface-alt); padding:1px 4px; border-radius:3px; font-size:10.5px}
+</style>
+</head>
+<body>
+
+<h1>ModelPaintPal · 数据可追溯性界面设计稿</h1>
+<div class="sub">沿用 <code>app/ui/theme.py</code> 的 Palette 配色 · 建议卡片 + 来源区 + 核实抽屉 · 三态对照</div>
+
+<!-- ============ 1. 折叠态 ============ -->
+<h2>1 · 建议卡片（默认折叠态）</h2>
+<p class="note">改动点：标题行加<b>来源角标</b>、置信度 chip；ΔE 徽章旁不加角标（那是算出来的）；卡片底部新增可折叠「来源」区。</p>
+<div class="stage">
+  <div class="card">
+    <div class="row">
+      <span class="badge">ΔE 0.84</span>
+      <span class="title">#1 郡士H H-47 透明红<span class="cite">1</span> · 可直接瓶用</span>
+    </div>
+    <div class="row" style="margin-top:5px">
+      <span class="chip ok">官方实测</span>
+      <span class="chip">水性丙烯酸</span>
+      <span class="chip">光泽</span>
+    </div>
+    <div class="subtitle">Clear Red · 色差判定：肉眼几乎无法分辨</div>
+
+    <div class="gauge">
+      <div class="gauge-bar">
+        <i style="background:#3FB950"></i><i style="background:#7BC96F"></i>
+        <i style="background:#D29922"></i><i style="background:#E08A4A"></i>
+        <i style="background:#F85149"></i>
+      </div>
+      <div class="gauge-mark"><span style="left:16.8%">▲</span></div>
+      <div class="gauge-scale"><span>0</span><span>1</span><span>2</span><span>3.5</span><span>5+</span></div>
+    </div>
+
+    <div class="strip">
+      <div class="sw"><div class="fill" style="background:#C8102E"></div><div class="meta"><b>目标色</b>#C8102E</div></div>
+      <div class="sw"><div class="fill" style="background:#BE1230"></div><div class="meta"><b>① H-47<span class="cite">1</span></b>ΔE 0.84</div></div>
+    </div>
+
+    <div class="usage">
+      <span class="chip">纯漆 4.62 ml</span><span class="chip">稀释剂 4.62 ml</span>
+      <span class="chip">混合液 9.24 ml</span><span class="chip">2 层</span>
+      <span class="chip">≈ 0.46 瓶</span>
+      <span class="chip infer">用量 推算</span>
+    </div>
+
+    <div class="alt">
+      替代色号：
+      <ul>
+        <li>· 田宫 X-27 透明红（同为 RLM 23 标准色 · <b style="color:var(--success)">证据强</b>）</li>
+        <li>· AV-MC 70.934 透明红（色差 ΔE 1.6，跨品牌最接近 · <span style="color:var(--warn)">证据弱</span>）</li>
+      </ul>
+    </div>
+
+    <div class="faint">提示：透明漆遮盖力弱，需底色；估算按已稀释混合液 110 ml/m²/层 推算，建议按你的喷笔习惯校准</div>
+
+    <div class="actions">
+      <button class="primary">复制配方</button>
+      <button>复制 Markdown</button>
+      <button>校准色值</button>
+      <button>核实来源</button>
+    </div>
+
+    <div class="prov">
+      <div class="prov-head"><span>▸ 来源 · 1 条引用 · 1 项推算</span><span>展开</span></div>
+    </div>
+  </div>
+
+  <div class="annot">
+    <b>为什么 ΔE 徽章不加角标</b>
+    <p>ΔE 是从两个 hex 算出来的，没有可点击的来源。给它挂角标会让用户以为点得开。</p>
+    <b>「用量 推算」用虚线 + 斜体</b>
+    <p>计算类结论与引用类结论走两套视觉语言：引用是实心角标，推算是虚线 chip。</p>
+    <b>替代色号标注证据强度</b>
+    <p>现有实现把「同标准色号」和「跨品牌最近色」混排只按 ΔE 排序，两者可信度差别很大。</p>
+  </div>
+</div>
+
+<!-- ============ 2. 展开态 ============ -->
+<h2>2 · 同一卡片，来源区展开</h2>
+<p class="note">引用编号按来源去重后稳定排序生成（遵守 <code>paint_db.by_brands()</code> 的可复现约定）。「推断」单独成组，不给编号。</p>
+<div class="stage">
+  <div class="card">
+    <div class="row">
+      <span class="badge">ΔE 0.84</span>
+      <span class="title">#1 郡士H H-47 透明红<span class="cite">1</span> · 可直接瓶用</span>
+    </div>
+    <div class="subtitle">Clear Red · 色差判定：肉眼几乎无法分辨</div>
+    <div class="strip">
+      <div class="sw"><div class="fill" style="background:#C8102E"></div><div class="meta"><b>目标色</b>#C8102E</div></div>
+      <div class="sw"><div class="fill" style="background:#BE1230"></div><div class="meta"><b>① H-47<span class="cite">1</span></b>ΔE 0.84</div></div>
+    </div>
+
+    <div class="prov">
+      <div class="prov-head"><span>▾ 来源 · 1 条引用 · 1 项推算</span><span>收起</span></div>
+      <div class="prov-body">
+        <div class="grp-title">事实引用</div>
+        <div class="src">
+          <div class="n">1</div>
+          <div class="txt">
+            <div class="nm">GSI Creos 官方产品目录 · Aqueous Hobby Color</div>
+            <a class="url" href="#">https://www.mr-hobby.com/en/product/aqueous/</a>
+            <div class="meta-line">厂家官方 · 采集于 2026-04 · 置信度 0.85</div>
+          </div>
+        </div>
+        <div class="grp-title">推断（无引用来源）</div>
+        <div class="src">
+          <div class="n" style="background:transparent;border:1px dashed var(--border-strong);color:var(--faint)">算</div>
+          <div class="txt">
+            <div class="nm" style="font-style:italic">用量、配比、ΔE 由本地计算得出</div>
+            <div class="meta-line">Kubelka-Munk 混合模型 · 110 ml/m²/层 锚点来自汽车底色漆工艺数据，模型漆膜更薄 → 已开放校准</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="actions"><button class="primary">复制配方</button><button>核实来源</button></div>
+  </div>
+
+  <div class="annot">
+    <b>链接不放进种子表</b>
+    <p>672 条色号只存来源 ID，URL 集中在 <code>sources.py</code>。改链接只改一处，且自检能断言「引用的 ID 必须存在」——这是"不得编造"的机械保证。</p>
+    <b>推断组不给编号</b>
+    <p>编号只属于能被点击核实的来源。推断项写清楚「用了什么模型、锚点从哪来、怎么校准」。</p>
+  </div>
+</div>
+
+<!-- ============ 3. 核实抽屉 ============ -->
+<h2>3 · 核实抽屉（联网能力的正确落点）</h2>
+<p class="note">只发送 <code>{品牌, 色号}</code> 文本，<b>不发送任何位图</b>。默认展示各源状态与耗时——这就是「检索过程可见」，而不是把 query rewrite 日志摊给用户。</p>
+<div class="stage">
+  <div class="drawer">
+    <div class="dtitle">核实来源 · 郡士H H-47</div>
+    <div class="faint" style="margin-bottom:6px">仅发送品牌与色号文本 · 本地值 #BE1230</div>
+
+    <div class="verify-row">
+      <span class="st ok">成功</span><span class="swatch-dot" style="background:#BE1230"></span>
+      <span>GSI Creos 官方　#BE1230</span><span class="ms">ΔE 0.00 · 412 ms</span>
+    </div>
+    <div class="verify-row">
+      <span class="st ok">成功</span><span class="swatch-dot" style="background:#C1122F"></span>
+      <span>paint-vault　#C1122F</span><span class="ms">ΔE 0.61 · 780 ms</span>
+    </div>
+    <div class="verify-row">
+      <span class="st timeout">超时</span><span class="swatch-dot" style="background:var(--surface-alt)"></span>
+      <span class="dim">paintatlas　—</span><span class="ms">&gt; 3000 ms</span>
+    </div>
+    <div class="verify-row">
+      <span class="st limit">限流</span><span class="swatch-dot" style="background:var(--surface-alt)"></span>
+      <span class="dim">HobbyDigi 目录　HTTP 429</span><span class="ms">130 ms</span>
+    </div>
+    <div class="verify-row">
+      <span class="st parse">解析失败</span><span class="swatch-dot" style="background:var(--surface-alt)"></span>
+      <span class="dim">某零售站　页面结构已变</span><span class="ms">905 ms</span>
+    </div>
+
+    <div class="verdict">
+      <b>结论：本地值与官方一致</b><br>
+      <span class="dim">2 个源响应，1 个超时，1 个被限流，1 个解析失败。官方与本地值 ΔE 0.00，无需修改。</span>
+    </div>
+
+    <div class="actions"><button class="primary">保持本地值</button><button>采用 #C1122F</button></div>
+  </div>
+
+  <div class="annot">
+    <b>「解析失败」≠「查无此色」</b>
+    <p>这两者含义相反，必须分开显示。合并成"未找到"会让用户以为这个色号不存在。</p>
+    <b>失败不改本地值</b>
+    <p>全部源失败时明确写「未能核实，当前值仍是 XX 来源于 YYYY-MM 的数据」，一字不改。这是最关键的回归测试断言。</p>
+    <b>缓存</b>
+    <p>慢变数据，TTL 90 天，缓存在 <code>userdata/cache/</code>，损坏时静默降级为未缓存。</p>
+  </div>
+</div>
+
+<!-- ============ 4. 低置信态 ============ -->
+<h2>4 · 低置信 / 数据过期态</h2>
+<p class="note">初次上线时未标注数据会被集体压到「推定」档。建议第一阶段先显示为温和的「未标注来源」，数据补齐后再切严格置信度。</p>
+<div class="stage">
+  <div class="card" style="width:520px">
+    <div class="row">
+      <span class="badge" style="background:var(--warn)">ΔE 2.71</span>
+      <span class="title">#3 盖亚 072 中性灰 IV<span class="cite weak">2</span> · 需调配</span>
+    </div>
+    <div class="row" style="margin-top:5px">
+      <span class="chip warn">推定色值</span>
+      <span class="chip warn">数据已过期 · 2021-08</span>
+      <span class="chip">置信度 0.45</span>
+    </div>
+    <div class="subtitle">Neutral Gray IV · 色差判定：近距离可见差异，喷涂可接受</div>
+
+    <div class="prov">
+      <div class="prov-head"><span>▾ 来源 · 1 条引用（弱）</span><span>收起</span></div>
+      <div class="prov-body">
+        <div class="src">
+          <div class="n weak">2</div>
+          <div class="txt">
+            <div class="nm">按同系列相邻色推定</div>
+            <div class="meta-line">无独立来源 · 采集于 2021-08 · 已超过 24 个月<br>
+            该色值未经任何外部来源确认，仅用于相对匹配，建议试喷后点「校准色值」</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="actions"><button class="primary">校准色值</button><button>核实来源</button></div>
+  </div>
+
+  <div class="annot">
+    <b>未标注 = 推定，不是未标注 = 可信</b>
+    <p>默认压低而不是抬高，才符合项目「数据不足就认」的原则。8 元组兼容分支必须把缺字段的行全部落到 <code>derived</code>。</p>
+    <b>过期是独立的信号</b>
+    <p>「来源弱」和「来源旧」是两件事，分别用 chip 呈现，不要把置信度糊成一个数字。</p>
+  </div>
+</div>
+
+</body>
+</html>
