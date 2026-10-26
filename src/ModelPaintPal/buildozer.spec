@@ -30,8 +30,8 @@ requirements = python3,kivy,pillow,plyer
 # (str) 应用方向
 orientation = portrait
 
-# (list) Android 权限：联网核实需要 INTERNET
-android.permissions = INTERNET
+# (list) Android 权限：联网核实需要 INTERNET；选相册照片需要读媒体权限
+android.permissions = INTERNET,READ_EXTERNAL_STORAGE,READ_MEDIA_IMAGES
 
 # (int) Android API / 最低 API / NDK
 android.api = 33
