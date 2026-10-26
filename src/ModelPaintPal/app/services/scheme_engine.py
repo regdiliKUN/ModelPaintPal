@@ -37,7 +37,7 @@ __all__ = [
 class SchemeType:
     """配色方案类型（字符串常量，便于序列化与配置）。"""
 
-    BASIC = "basic"               # 基础色盘：经典红/橙/黄/绿/蓝/紫
+    BASIC = "basic"               # 基础色盘：经典红/黄/蓝/白/黑
     COMPLEMENTARY = "complementary"
     SPLIT = "split"
     TRIADIC = "triadic"          # 三原色式三角（红/黄/蓝风）
@@ -49,7 +49,7 @@ class SchemeType:
 # 下拉框顺序：基础色盘放第一个，最贴合"红黄蓝等等"的诉求
 SCHEME_ORDER: List[Tuple[str, str, str]] = [
     (SchemeType.BASIC, "基础色盘",
-     "经典基础色（红/橙/黄/绿/蓝/紫），给出每个基础色在库内的最近漆"),
+     "经典基础色（红/黄/蓝/白/黑），给出每个基础色在库内的最近漆"),
     (SchemeType.COMPLEMENTARY, "互补色",
      "基色 + 色环正对面（180°），对比最强"),
     (SchemeType.SPLIT, "分裂互补",
@@ -116,15 +116,17 @@ def _rotated(hue: float, sat: float, val: float) -> RGB:
 
 
 def _basic_palette() -> List[SchemeColor]:
-    """经典基础色盘：固定 6 个画家基础色相，给一个统一的鲜艳取值。"""
-    # 红/橙/黄/绿/蓝/紫——覆盖"红黄蓝等等"的全部基础色
+    """经典基础色盘：红/黄/蓝/白/黑，最朴素的一组基础漆。
+
+    这五瓶就是用户的"基础漆库"——其它颜色都靠它们调配。红/黄/蓝取鲜艳
+    纯色；白/黑为无彩色的极亮/极暗，固定不随吸到的基色变化。
+    """
     specs = [
         ("红", 0.0, 85.0, 90.0),
-        ("橙", 30.0, 88.0, 92.0),
         ("黄", 54.0, 90.0, 92.0),
-        ("绿", 130.0, 80.0, 85.0),
         ("蓝", 222.0, 85.0, 90.0),
-        ("紫", 282.0, 78.0, 88.0),
+        ("白", 0.0, 0.0, 100.0),
+        ("黑", 0.0, 0.0, 6.0),
     ]
     return [SchemeColor(role, _rotated(h, s, v)) for role, h, s, v in specs]
 

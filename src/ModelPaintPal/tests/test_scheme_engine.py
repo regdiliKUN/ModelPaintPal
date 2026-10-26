@@ -18,7 +18,7 @@ BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
 
 EXPECTED_COUNTS = {
-    SchemeType.BASIC: 6,
+    SchemeType.BASIC: 5,
     SchemeType.COMPLEMENTARY: 2,
     SchemeType.SPLIT: 3,
     SchemeType.TRIADIC: 3,
@@ -60,7 +60,7 @@ class SchemeEngineTest(unittest.TestCase):
     def test_basic_palette_roles(self):
         colors = generate_scheme_colors(RED, SchemeType.BASIC)
         roles = [c.role for c in colors]
-        self.assertEqual(roles, ["红", "橙", "黄", "绿", "蓝", "紫"])
+        self.assertEqual(roles, ["红", "黄", "蓝", "白", "黑"])
 
     def test_analogous_offsets_are_adjacent_hues(self):
         colors = generate_scheme_colors(RED, SchemeType.ANALOGOUS, 5)
