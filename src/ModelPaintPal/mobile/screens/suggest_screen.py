@@ -4,14 +4,13 @@
 from __future__ import annotations
 
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.scrollview import ScrollView
 from kivy.uix.screenmanager import Screen
-from kivy.uix.spinner import Spinner
+from kivy.uix.scrollview import ScrollView
 
 from ..logic import (compute_suggest, copy_text, get_config, run_verify,
-                    save_config, share_text)
-from ..theme import CARD, TEXT, hex_to_kivy
-from ..widgets import AccentButton, Dim
+                     save_config, share_text)
+from ..theme import CTRL_H, D, S
+from ..widgets import AccentButton, Dim, Select
 from ..widgets.cards import SuggestionCard
 from .dialogs import info_dialog, text_input_dialog
 
@@ -25,13 +24,12 @@ class SuggestScreen(Screen):
         self._build()
 
     def _build(self):
-        root = BoxLayout(orientation="vertical", spacing=8, padding=[14, 12, 14, 10])
+        root = BoxLayout(orientation="vertical", spacing=D(8),
+                         padding=[D(14), D(10), D(14), D(8)])
         # 工具条
-        bar = BoxLayout(size_hint_y=None, height=44, spacing=8)
+        bar = BoxLayout(size_hint_y=None, height=D(CTRL_H), spacing=D(8))
         cfg = get_config()
-        self._brand_spin = Spinner(text="全部品牌", size_hint_x=0.42, font_size=14,
-                                  background_color=hex_to_kivy(CARD),
-                                  color=hex_to_kivy(TEXT))
+        self._brand_spin = Select(text="全部品牌", size_hint_x=0.46)
         brands = list(get_brands().items())
         self._brand_map = {"全部品牌": []}
         opts = ["全部品牌"]
@@ -40,23 +38,23 @@ class SuggestScreen(Screen):
             opts.append(b.short)
         self._brand_spin.values = opts
         self._brand_spin.bind(text=self._on_brand)
-        self._formula_spin = Spinner(text=cfg.delta_e_formula, size_hint_x=0.3,
-                                     font_size=14, background_color=hex_to_kivy(CARD),
-                                     color=hex_to_kivy(TEXT))
+
+        self._formula_spin = Select(text=cfg.delta_e_formula, size_hint_x=0.32)
         self._formula_spin.values = ["CIEDE2000", "CIE94", "CIE76", "CMC"]
         self._formula_spin.bind(text=self._on_formula)
-        share_b = AccentButton(text="复制分享", size_hint_x=0.28)
+
+        share_b = AccentButton(text="分享", size_hint_x=0.22, font_size=S(13))
         share_b.bind(on_release=lambda *_: self._share())
         bar.add_widget(self._brand_spin)
         bar.add_widget(self._formula_spin)
         bar.add_widget(share_b)
         root.add_widget(bar)
 
-        self._hint = Dim(text="先在「取色」页取一个颜色", font_size=14, size_hint_y=None, height=30)
+        self._hint = Dim(text="先在「取色」页取一个颜色", font_size=S(13))
         root.add_widget(self._hint)
 
-        body = ScrollView()
-        self._list = BoxLayout(orientation="vertical", spacing=12, size_hint_y=None)
+        body = ScrollView(do_scroll_x=False, bar_width=0)
+        self._list = BoxLayout(orientation="vertical", spacing=D(12), size_hint_y=None)
         self._list.bind(minimum_height=self._list.setter("height"))
         body.add_widget(self._list)
         root.add_widget(body)
@@ -93,9 +91,9 @@ class SuggestScreen(Screen):
             self._hint.text = "没有找到可用建议，换个品牌范围试试"
             return
         self._hint.text = f"共 {len(self._suggestions)} 条建议"
+        target = getattr(self.app, "current_hex", "") if self.app.current_rgb else ""
         for sug in self._suggestions:
-            card = SuggestionCard(suggestion=sug,
-                                  target_hex=self.app.current_hex if self.app.current_rgb else "")
+            card = SuggestionCard(suggestion=sug, target_hex=target)
             card.on_action = self._on_action
             card.on_toast = self.app.toast
             self._list.add_widget(card)

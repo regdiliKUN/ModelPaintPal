@@ -8,6 +8,7 @@ from kivy.uix.screenmanager import Screen
 from kivy.uix.scrollview import ScrollView
 
 from ..logic import compute_suggest, copy_text, get_config
+from ..theme import D, S
 from ..widgets import Card, Dim, Title
 from ..widgets.cards import SwatchGrid
 
@@ -20,11 +21,12 @@ class VisualizeScreen(Screen):
         self._build()
 
     def _build(self):
-        root = BoxLayout(orientation="vertical", spacing=8, padding=[14, 12, 14, 10])
-        self._hint = Dim(text="先在「取色」页取一个颜色", font_size=14, size_hint_y=None, height=30)
+        root = BoxLayout(orientation="vertical", spacing=D(8),
+                         padding=[D(14), D(10), D(14), D(8)])
+        self._hint = Dim(text="先在「取色」页取一个颜色", font_size=S(13))
         root.add_widget(self._hint)
-        body = ScrollView()
-        self._inner = BoxLayout(orientation="vertical", spacing=12, size_hint_y=None)
+        body = ScrollView(do_scroll_x=False, bar_width=0)
+        self._inner = BoxLayout(orientation="vertical", spacing=D(12), size_hint_y=None)
         self._inner.bind(minimum_height=self._inner.setter("height"))
         body.add_widget(self._inner)
         root.add_widget(body)
@@ -49,8 +51,8 @@ class VisualizeScreen(Screen):
         for sug in result:
             items.append((sug.anchor.hex, sug.anchor.code))
         card = Card()
-        card.add_widget(Title(text="色卡对比（点按复制色值）", font_size=16))
-        grid = SwatchGrid(cols=4)
+        card.add_widget(Title(text="色卡对比（点按复制色值）", font_size=S(16)))
+        grid = SwatchGrid(cols=3)
         grid.set_swatches(items, on_pick=self._on_pick)
         card.add_widget(grid)
         self._inner.add_widget(card)

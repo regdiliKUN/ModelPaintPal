@@ -19,13 +19,31 @@
 mobile/
   bootstrap.py      # 路径重定向：把用户数据写到 Android 可写目录
   logic.py          # 逻辑胶水层（复用 core/data/services，线程计算 + Kivy 剪贴板）
-  theme.py          # 移动端主题
+  theme.py          # 主题：配色 + D()/S() 尺寸换算
+  fonts.py          # 中文字体注册（内置 Noto Sans SC，逐级回退系统字体）
+  assets/fonts/     # 随包字体（打 APK 时一并打包）
   app.py            # Kivy App + 底部导航
   widgets/          # 通用控件 + 建议卡片 / 混色比例条 / 色卡网格
   screens/          # 各功能页
   main.py           # 入口
   tests/            # 测试
 ```
+
+## 移动端适配约定（重要，改 UI 前先看）
+1. **所有尺寸必须用 `D(x)`（dp）和 `S(x)`（sp）换算**，不能直接写像素数字。
+   高密度屏（1080p，density≈2.75）上写死的 `48` 只有约 17dp，整页会被压成顶部一条。
+   `S()` 还处理了「窗口未就绪时 Kivy `fontscale` 为 -1」的坑，避免出现负字号。
+2. **滚动容器里的卡片必须自适应高度**（`size_hint_y=None` + `minimum_height`）。
+   `Card` 已内置；若子控件 `size_hint_y` 为默认值 1，`BoxLayout.minimum_height` 会算成 0，
+   整页高度塌陷（这也是"打开后只剩一条"的元凶之一）。
+3. **中文字体必须注册**。Kivy 默认 Roboto 不含中日韩字形，不注册就是一片方框。
+   `fonts.py` 会把内置字体同时注册为 `MppCJK` 并覆盖默认 `Roboto`，
+   因此 Spinner / TextInput 等系统控件也自动生效。
+4. **不要在绑定回调里 `canvas.clear()` 重建绘图指令**，会破坏 Kivy 渲染上下文栈，
+   触发 `RenderContext.pop_state` 的 `IndexError` 崩溃。绘图指令只建一次，之后只改属性。
+5. **带 `suggestion=` 等初值构造的控件要在 `__init__` 末尾主动渲染一次**，
+   因为 Kivy 的 `bind` 在构造末尾才建立，初始值不会触发回调（否则卡片是空的）。
+6. 触控目标不小于 48dp；底部导航高度 `D(56)`。
 
 ## 本地桌面调试
 ```bash
@@ -45,12 +63,15 @@ buildozer android debug        # 生成 bin/ModelPaintPal-1.1.0-debug.apk
 buildozer android release      # 签名发布版（需先配置 keystore）
 ```
 
-> 说明：当前开发沙箱没有 Java / Android SDK，无法在此编译 `.apk`；上面的 app 代码已在桌面端
-> 跑通并通过逻辑测试，按上述命令在装有工具链的机器上即可出包。
+> `buildozer.spec` 的 `source.include_exts` 已包含 `otf`，确保内置中文字体被打进 APK；
+> `android.permissions` 已包含 `READ_MEDIA_IMAGES`（Android 13+ 选图需要）。
 
 ## 测试
 ```bash
 python -m unittest discover -s mobile/tests -p "test_*.py" -v
 ```
 - `test_mobile_logic.py`：核心移植功能（建议 / 调配 / 覆盖率 / 收藏 / 导出 / 校准），无需图形界面即可运行。
-- `test_mobile_ui.py`：界面冒烟（在无显示环境会自动跳过，在有图形界面的机器 / CI 上运行）。
+- `test_mobile_ui.py`：界面冒烟 + **适配回归**（字号必须按 sp 缩放、卡片高度不能塌陷、
+  导航满足 48dp 触摸目标）。
+- 无头环境跑 UI 测试需指定窗口后端：`KIVY_WINDOW=sdl2 python -m unittest ...`，
+  否则 Kivy 在 import 阶段会静默崩溃。

@@ -5,16 +5,16 @@ from __future__ import annotations
 
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.screenmanager import Screen
-from kivy.uix.spinner import Spinner
-from kivy.uix.textinput import TextInput
+from kivy.uix.scrollview import ScrollView
 
-from ..logic import (compute_coverage, get_config,
-                    save_config, set_coverage_input)
-from ..theme import CARD, TEXT, hex_to_kivy
-from ..widgets import Card, Dim, GhostButton, Txt, Title
+from ..logic import compute_coverage, get_config, save_config, set_coverage_input
+from ..theme import CTRL_H, D, S
+from ..widgets import Card, Dim, Field, GhostButton, Select, Txt, Title
 
 
 class CoverageScreen(Screen):
+    LABEL_W = 108  # 设计值 dp
+
     def __init__(self, **kwargs):
         name = kwargs.pop("name", "coverage")
         super().__init__(**kwargs)
@@ -22,80 +22,60 @@ class CoverageScreen(Screen):
         self._build()
 
     def _build(self):
-        root = BoxLayout(orientation="vertical", spacing=8, padding=[14, 12, 14, 10])
+        root = BoxLayout(orientation="vertical", spacing=D(8),
+                         padding=[D(14), D(10), D(14), D(8)])
+        body = ScrollView(do_scroll_x=False, bar_width=0)
+        inner = BoxLayout(orientation="vertical", spacing=D(12), size_hint_y=None)
+        inner.bind(minimum_height=inner.setter("height"))
+
         cfg = get_config()
-        body = BoxLayout(orientation="vertical", spacing=12)
-
         card = Card()
-        card.add_widget(Title(text="喷涂参数", font_size=16))
+        card.add_widget(Title(text="喷涂参数", font_size=S(16)))
 
-        self._area = TextInput(text=str(int(cfg.area_m2 * 10000)), multiline=False,
-                               size_hint_y=None, height=42, input_type="number",
-                               background_color=hex_to_kivy(CARD),
-                               foreground_color=hex_to_kivy(TEXT), font_size=15)
+        self._area = Field(text=str(int(cfg.area_m2 * 10000)), input_type="number")
         self._area.bind(on_text_validate=lambda *_: self._apply())
-        card.clear_widgets()
-        card.add_widget(Title(text="喷涂参数", font_size=16))
+        card.add_widget(self._row("面积 cm²", self._area))
 
-        area_row = BoxLayout(size_hint_y=None, height=42, spacing=8)
-        area_row.add_widget(Dim(text="面积 cm²", size_hint_x=0.35))
-        area_row.add_widget(self._area)
-        card.add_widget(area_row)
-
-        self._coats = Spinner(text=str(cfg.coats), size_hint_y=None, height=42,
-                              values=[str(i) for i in range(1, 9)],
-                              background_color=hex_to_kivy(CARD),
-                              color=hex_to_kivy(TEXT), font_size=15)
+        self._coats = Select(text=str(cfg.coats),
+                             values=[str(i) for i in range(1, 9)])
         self._coats.bind(text=lambda *a: self._apply())
-        coats_row = BoxLayout(size_hint_y=None, height=42, spacing=8)
-        coats_row.add_widget(Dim(text="层数", size_hint_x=0.35))
-        coats_row.add_widget(self._coats)
-        card.add_widget(coats_row)
+        card.add_widget(self._row("层数", self._coats))
 
-        self._thinner = TextInput(text=str(cfg.thinner_ratio), multiline=False,
-                                  size_hint_y=None, height=42, input_type="number",
-                                  background_color=hex_to_kivy(CARD),
-                                  foreground_color=hex_to_kivy(TEXT), font_size=15)
+        self._thinner = Field(text=str(cfg.thinner_ratio), input_type="number")
         self._thinner.bind(on_text_validate=lambda *_: self._apply())
-        thinner_row = BoxLayout(size_hint_y=None, height=42, spacing=8)
-        thinner_row.add_widget(Dim(text="稀释比(漆:稀)", size_hint_x=0.35))
-        thinner_row.add_widget(self._thinner)
-        card.add_widget(thinner_row)
+        card.add_widget(self._row("稀释比(漆:稀)", self._thinner))
 
-        self._app_spin = Spinner(text=cfg.application, size_hint_y=None, height=42,
-                                 values=["airbrush", "spray_can", "brush"],
-                                 background_color=hex_to_kivy(CARD),
-                                 color=hex_to_kivy(TEXT), font_size=15)
+        self._app_spin = Select(text=cfg.application,
+                                values=["airbrush", "spray_can", "brush"])
         self._app_spin.bind(text=lambda *a: self._apply())
-        app_row = BoxLayout(size_hint_y=None, height=42, spacing=8)
-        app_row.add_widget(Dim(text="工具", size_hint_x=0.35))
-        app_row.add_widget(self._app_spin)
-        card.add_widget(app_row)
+        card.add_widget(self._row("工具", self._app_spin))
 
-        self._surf_spin = Spinner(text=cfg.surface, size_hint_y=None, height=42,
-                                  values=["primed", "raw_print", "smooth"],
-                                  background_color=hex_to_kivy(CARD),
-                                  color=hex_to_kivy(TEXT), font_size=15)
+        self._surf_spin = Select(text=cfg.surface,
+                                 values=["primed", "raw_print", "smooth"])
         self._surf_spin.bind(text=lambda *a: self._apply())
-        surf_row = BoxLayout(size_hint_y=None, height=42, spacing=8)
-        surf_row.add_widget(Dim(text="表面", size_hint_x=0.35))
-        surf_row.add_widget(self._surf_spin)
-        card.add_widget(surf_row)
-
-        body.add_widget(card)
+        card.add_widget(self._row("表面", self._surf_spin))
+        inner.add_widget(card)
 
         self._result = Card()
-        self._result.add_widget(Title(text="用量估算", font_size=16))
-        self._result_text = Txt(text="—", font_size=14)
+        self._result.add_widget(Title(text="用量估算", font_size=S(16)))
+        self._result_text = Txt(text="—", font_size=S(13))
         self._result.add_widget(self._result_text)
-        body.add_widget(self._result)
+        inner.add_widget(self._result)
 
-        back = GhostButton(text="返回", size_hint_y=None, height=44)
+        back = GhostButton(text="返回")
         back.bind(on_release=lambda *_: self.app.go_to("more"))
-        body.add_widget(back)
+        inner.add_widget(back)
 
+        body.add_widget(inner)
         root.add_widget(body)
         self.add_widget(root)
+
+    def _row(self, label, control) -> BoxLayout:
+        row = BoxLayout(size_hint_y=None, height=D(CTRL_H), spacing=D(8))
+        row.add_widget(Dim(text=label, size_hint_x=None, width=D(self.LABEL_W),
+                           font_size=S(13)))
+        row.add_widget(control)
+        return row
 
     def _apply(self):
         try:

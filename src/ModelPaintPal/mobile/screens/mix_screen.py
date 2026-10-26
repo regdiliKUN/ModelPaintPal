@@ -5,13 +5,11 @@ from __future__ import annotations
 
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.screenmanager import Screen
-from kivy.uix.spinner import Spinner
 from kivy.uix.scrollview import ScrollView
 
-from ..logic import (compute_mix, get_config, set_drop_total,
-                    set_mix_brands)
-from ..theme import (BASE_COLORS, CARD, TEXT, hex_to_kivy)
-from ..widgets import (Card, Dim, Txt, Title)
+from ..logic import (compute_mix, get_config, set_drop_total, set_mix_brands)
+from ..theme import BASE_COLORS, CTRL_H, D, S, hex_to_kivy
+from ..widgets import Card, ColorRect, Dim, Select, Txt, Title
 from ..widgets.cards import MixRatioBar
 
 
@@ -24,38 +22,32 @@ class MixScreen(Screen):
         self._build()
 
     def _build(self):
-        root = BoxLayout(orientation="vertical", spacing=8, padding=[14, 12, 14, 10])
-        bar = BoxLayout(size_hint_y=None, height=44, spacing=8)
+        root = BoxLayout(orientation="vertical", spacing=D(8),
+                         padding=[D(14), D(10), D(14), D(8)])
+        bar = BoxLayout(size_hint_y=None, height=D(CTRL_H), spacing=D(8))
         cfg = get_config()
-        self._brand_spin = Spinner(text="混搭（全部品牌）", size_hint_x=0.6, font_size=14,
-                                  background_color=hex_to_kivy(CARD),
-                                  color=hex_to_kivy(TEXT))
+        self._brand_spin = Select(text="混搭（全部品牌）", size_hint_x=0.6)
         brands = list(get_brands().items())
         self._brand_map = {"混搭（全部品牌）": []}
-        opts = ["混搭（全部品牌）", "单品牌：田宫"]
-        # 提供田宫作为常见默认单品牌，外加全部品牌可选
-        self._brand_map["单品牌：田宫"] = ["tamiya"]
+        opts = ["混搭（全部品牌）"]
         for key, b in brands:
-            if key == "tamiya":
-                continue
             self._brand_map[f"单品牌：{b.short}"] = [key]
             opts.append(f"单品牌：{b.short}")
         self._brand_spin.values = opts
         self._brand_spin.bind(text=self._on_brand)
-        self._drops_spin = Spinner(text=f"总滴数 {cfg.drop_total}", size_hint_x=0.4,
-                                   font_size=14, background_color=hex_to_kivy(CARD),
-                                   color=hex_to_kivy(TEXT))
+
+        self._drops_spin = Select(text=f"总滴数 {cfg.drop_total}", size_hint_x=0.4)
         self._drops_spin.values = [f"总滴数 {n}" for n in (10, 15, 20, 30, 40, 50)]
         self._drops_spin.bind(text=self._on_drops)
         bar.add_widget(self._brand_spin)
         bar.add_widget(self._drops_spin)
         root.add_widget(bar)
 
-        self._hint = Dim(text="先在「取色」页取一个颜色", font_size=14, size_hint_y=None, height=30)
+        self._hint = Dim(text="先在「取色」页取一个颜色", font_size=S(13))
         root.add_widget(self._hint)
 
-        body = ScrollView()
-        self._inner = BoxLayout(orientation="vertical", spacing=12, size_hint_y=None)
+        body = ScrollView(do_scroll_x=False, bar_width=0)
+        self._inner = BoxLayout(orientation="vertical", spacing=D(12), size_hint_y=None)
         self._inner.bind(minimum_height=self._inner.setter("height"))
         body.add_widget(self._inner)
         root.add_widget(body)
@@ -66,7 +58,10 @@ class MixScreen(Screen):
         self._recompute()
 
     def _on_drops(self, spin, text):
-        n = int(text.replace("总滴数 ", "").strip())
+        try:
+            n = int(text.replace("总滴数 ", "").strip())
+        except ValueError:
+            return
         set_drop_total(n)
         self._recompute()
 
@@ -90,22 +85,23 @@ class MixScreen(Screen):
     def _render(self):
         self._inner.clear_widgets()
         r = self._recipe
-        self._hint.text = (f"用五瓶基础漆调出目标色（近似 ΔE {r.delta_e:.1f}）")
+        self._hint.text = f"用五瓶基础漆调出目标色（近似 ΔE {r.delta_e:.1f}）"
+
         # 比例条
         bar_card = Card()
-        bar_card.add_widget(Title(text="混色比例", font_size=16))
+        bar_card.add_widget(Title(text="混色比例", font_size=S(16)))
         self._bar = MixRatioBar()
         segs = []
         for c in r.components:
             segs.append((c.role, BASE_COLORS.get(c.role, "#888888"), c.percent))
         self._bar.segments = segs
         bar_card.add_widget(self._bar)
+
         # 预测色 vs 目标色
-        cmp_row = BoxLayout(size_hint_y=None, height=46, spacing=12)
-        from ..widgets import ColorRect
-        tg = ColorRect(size_hint=(None, None), size=(40, 40), radius=[8])
+        cmp_row = BoxLayout(size_hint_y=None, height=D(44), spacing=D(10))
+        tg = ColorRect(size_hint=(None, None), size=(D(36), D(36)), radius=[D(8)])
         tg.color = hex_to_kivy(rgb_to_hex(r.target_rgb))
-        pr = ColorRect(size_hint=(None, None), size=(40, 40), radius=[8])
+        pr = ColorRect(size_hint=(None, None), size=(D(36), D(36)), radius=[D(8)])
         pr.color = hex_to_kivy(rgb_to_hex(r.predicted_rgb))
         cmp_row.add_widget(Txt(text="目标", size_hint_x=0.2))
         cmp_row.add_widget(tg)
@@ -118,16 +114,16 @@ class MixScreen(Screen):
         for c in r.components:
             card = Card()
             card.add_widget(Title(text=f"{c.role} · {c.percent:.1f}% · {c.drops} 滴",
-                                 font_size=15))
+                                  font_size=S(15)))
             sug = c.suggestion
             if sug is not None:
                 a = sug.anchor
-                card.add_widget(Txt(text=f"推荐：{a.brand_label} {a.code} {a.name} "
-                                         f"（{a.hex}）", font_size=14))
+                card.add_widget(Txt(text=f"推荐：{a.brand_label} {a.code} {a.name}"
+                                         f"（{a.hex}）", font_size=S(13)))
                 card.add_widget(Dim(text=f"ΔE {sug.delta_e:.2f} · {sug.mode_label}",
-                                   font_size=13))
+                                    font_size=S(12)))
             else:
-                card.add_widget(Dim(text="当前品牌范围暂无匹配", font_size=13))
+                card.add_widget(Dim(text="当前品牌范围暂无匹配", font_size=S(12)))
             self._inner.add_widget(card)
 
     def on_color(self, rgb):

@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 from kivy.app import App
+from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.graphics import Color, RoundedRectangle
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.uix.modalview import ModalView
 from kivy.uix.screenmanager import ScreenManager, SlideTransition
 
 from .bootstrap import set_user_dir
@@ -21,7 +24,8 @@ from .screens.pick_screen import PickScreen
 from .screens.settings_screen import SettingsScreen
 from .screens.suggest_screen import SuggestScreen
 from .screens.visualize_screen import VisualizeScreen
-from .theme import (ACCENT, BOTTOM_NAV_H, BG, TEXT_DIM, hex_to_kivy)
+from .theme import (ACCENT, BG, D, FONT, NAV_BG, NAV_H, S, TEXT, TEXT_DIM,
+                    hex_to_kivy)
 
 NAV_ITEMS = [
     ("取色", "pick"),
@@ -32,39 +36,86 @@ NAV_ITEMS = [
 ]
 
 
+class NavItem(Button):
+    """底部导航项：激活时高亮。"""
+
+    def __init__(self, label, name, on_press_cb, **kwargs):
+        kwargs.setdefault("text", label)
+        kwargs.setdefault("font_name", FONT)
+        kwargs.setdefault("font_size", S(12))
+        kwargs.setdefault("background_normal", "")
+        kwargs.setdefault("background_color", hex_to_kivy(NAV_BG))
+        kwargs.setdefault("color", hex_to_kivy(TEXT_DIM))
+        kwargs.setdefault("size_hint_y", None)
+        kwargs.setdefault("height", D(NAV_H))
+        super().__init__(**kwargs)
+        self.nav_name = name
+        self.bind(on_release=lambda *_: on_press_cb(name))
+        with self.canvas.before:
+            Color(*hex_to_kivy(NAV_BG))
+            self._bg = RoundedRectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self._upd, size=self._upd)
+
+    def _upd(self, *args):
+        self._bg.pos = self.pos
+        self._bg.size = self.size
+
+    def set_active(self, active: bool):
+        self.color = hex_to_kivy(ACCENT if active else TEXT_DIM)
+
+
 class NavBar(BoxLayout):
     def __init__(self, app, **kwargs):
         kwargs.setdefault("size_hint_y", None)
-        kwargs.setdefault("height", BOTTOM_NAV_H)
+        kwargs.setdefault("height", D(NAV_H))
         kwargs.setdefault("spacing", 0)
+        kwargs.setdefault("padding", [0, 0, 0, 0])
         super().__init__(**kwargs)
         self.app = app
         self.buttons = {}
+        self._active = "pick"
         with self.canvas.before:
-            Color(*hex_to_kivy("#0b0e14"))
+            Color(*hex_to_kivy(NAV_BG))
             self._bg = RoundedRectangle(pos=self.pos, size=self.size)
-        self.bind(pos=self._upd, size=self._upd)
+        # 激活项顶部的短横指示条（放在导航条自己的画布上，位置由索引算出，
+        # 避免跟着按钮的 size/pos 更新顺序出现偏移）
+        with self.canvas.after:
+            Color(*hex_to_kivy(ACCENT))
+            self._ind = RoundedRectangle(pos=self.pos, size=(0, 0), radius=[D(2)])
+        self.bind(pos=self._refresh, size=self._refresh)
         for label, name in NAV_ITEMS:
-            b = Button(text=label, on_press=lambda inst, n=name: app.go_to(n))
-            b.background_normal = ""
-            b.background_color = hex_to_kivy("#0b0e14")
-            b.color = hex_to_kivy(TEXT_DIM)
-            b.font_size = 14
-            b.size_hint_y = None
-            b.height = BOTTOM_NAV_H
+            b = NavItem(label, name, self._on_nav)
             self.buttons[name] = b
             self.add_widget(b)
         self._highlight("pick")
 
-    def _upd(self, *a):
+    def _on_nav(self, name):
+        self.app.go_to(name)
+
+    def _place_indicator(self, *args):
+        names = [n for _, n in NAV_ITEMS]
+        if self._active not in names:
+            self._ind.size = (0, 0)
+            return
+        idx = names.index(self._active)
+        slot = self.width / len(names)
+        w = D(22)
+        self._ind.pos = (self.x + idx * slot + (slot - w) / 2.0, self.top - D(3))
+        self._ind.size = (w, D(3))
+
+    def _refresh(self, *args):
+        self._upd()
+        self._place_indicator()
+
+    def _upd(self, *args):
         self._bg.pos = self.pos
         self._bg.size = self.size
 
     def _highlight(self, name):
+        self._active = name
         for n, b in self.buttons.items():
-            active = (n == name)
-            b.color = hex_to_kivy(ACCENT if active else "#94a0b3")
-            b.background_color = hex_to_kivy("#0b0e14")
+            b.set_active(n == name)
+        self._place_indicator()
 
 
 class MppApp(App):
@@ -74,14 +125,16 @@ class MppApp(App):
     def build(self):
         set_user_dir(self.user_data_dir)
         ensure_init()
-        self.title = "ModelPaintPal 移动端"
+        self.title = "ModelPaintPal"
         try:
             Window.clearcolor = hex_to_kivy(BG)
+            # 键盘弹出时把输入框顶上来，避免被遮挡
+            Window.softinput_mode = "below_target"
         except Exception:
-            pass  # 无显示环境（如无头测试）跳过清屏色
+            pass  # 无显示环境（如无头测试）跳过窗口设置
 
         root = BoxLayout(orientation="vertical")
-        sm = ScreenManager(transition=SlideTransition())
+        sm = ScreenManager(transition=SlideTransition(duration=0.18))
         self.sm = sm
 
         self.screens = {}
@@ -101,11 +154,26 @@ class MppApp(App):
         root.add_widget(self.nav)
         return root
 
+    def on_start(self):
+        # 安卓返回键：逐级退回主页面
+        try:
+            Window.bind(on_keyboard=self._on_key)
+        except Exception:
+            pass
+
+    def _on_key(self, window, key, *args):
+        if key == 27:  # ESC / 安卓返回键
+            if self.sm.current != "pick":
+                self.go_to("pick")
+                return True
+        return False
+
     # ------------------------------------------------------------ 导航
     def go_to(self, name):
         if name in self.screens:
             self.sm.current = name
-        self.nav._highlight(name if name in dict(NAV_ITEMS) else "more")
+        nav_names = {n for _, n in NAV_ITEMS}
+        self.nav._highlight(name if name in nav_names else "more")
 
     # ------------------------------------------------------------ 颜色共享
     def set_current_color(self, rgb, source="manual"):
@@ -122,11 +190,22 @@ class MppApp(App):
         self.set_current_color(rgb, source)
 
     def toast(self, msg):
-        from kivy.uix.label import Label
-        from kivy.uix.modalview import ModalView
-        mv = ModalView(size_hint=(None, None), size=(min(360, Window.width - 40), 48),
-                       background_color=(0, 0, 0, 0.001), auto_dismiss=True,
-                       timeout=1.6)
-        lb = Label(text=msg, color=hex_to_kivy("#ffffff"), font_size=15)
-        mv.add_widget(lb)
-        mv.open()
+        try:
+            width = min(D(320), max(Window.width - D(40), D(140)))
+            mv = ModalView(size_hint=(None, None), size=(width, D(52)),
+                           background_color=(0, 0, 0, 0), auto_dismiss=True)
+            box = BoxLayout(size_hint=(1, 1), padding=[D(10)] * 2)
+            with box.canvas.before:
+                Color(*hex_to_kivy("#2b3342"))
+                r = RoundedRectangle(pos=box.pos, size=box.size, radius=[D(14)])
+            box.bind(pos=lambda inst, val: setattr(r, "pos", val),
+                     size=lambda inst, val: setattr(r, "size", val))
+            lb = Label(text=msg, color=hex_to_kivy(TEXT), font_name=FONT,
+                       font_size=S(14), halign="center", valign="middle")
+            lb.bind(size=lambda inst, val: setattr(inst, "text_size", val))
+            box.add_widget(lb)
+            mv.add_widget(box)
+            mv.open()
+            Clock.schedule_once(lambda dt: mv.dismiss(), 1.6)
+        except Exception:
+            pass  # 提示失败不应影响主流程

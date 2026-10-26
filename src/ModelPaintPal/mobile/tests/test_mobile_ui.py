@@ -82,6 +82,37 @@ class UISmokeTest(unittest.TestCase):
         # _inner 内应有色卡对比卡片
         self.assertGreater(len(scr._inner.children), 0)
 
+    # ------------------------------------------------------ 适配回归（关键）
+    def test_units_are_density_scaled(self):
+        """字号/尺寸必须走 sp/dp，而不是写死像素（1080p 安卓屏会缩成一条）。"""
+        from kivy.metrics import dp
+        from mobile.widgets import Card, Txt
+
+        txt = Txt(text="适配测试")
+        self.assertGreaterEqual(txt.font_size, dp(12) * 0.99,
+                                "字号必须按 sp 缩放，否则手机上会小到看不见")
+        card = Card()
+        self.assertIsNone(card.size_hint_y,
+                          "卡片必须自适应高度，否则 ScrollView 内容会被压扁")
+        ref = card.padding[0]
+        self.assertGreaterEqual(ref, dp(12) * 0.99,
+                                "卡片内边距必须按 dp 缩放")
+
+    def test_scroll_cards_have_height(self):
+        """滚动容器里的卡片高度必须大于 0（曾经因 size_hint_y=1 全部塌成 0）。"""
+        from mobile.widgets import Card, Txt
+
+        card = Card()
+        card.add_widget(Txt(text="一行内容"))
+        self.assertGreater(card.height, 0, "卡片高度塌陷，页面会只剩顶部一条")
+
+    def test_nav_touch_target(self):
+        """底部导航要满足 48dp 触摸目标。"""
+        from mobile.theme import D
+
+        self.assertGreaterEqual(self.app.nav.height, D(48))
+        self.assertEqual(len(self.app.nav.buttons), 5)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

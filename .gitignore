@@ -7,3 +7,8 @@ src/ModelPaintPal/build/
 src/ModelPaintPal/dist/
 *.log
 .env
+# 出包产物（本地保留，不入库）
+apk/
+bin/
+*.apk
+ModelPaintPal-mobile-apk-package.zip

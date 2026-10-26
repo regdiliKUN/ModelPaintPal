@@ -13,7 +13,7 @@ package.domain = org.kivy
 source.dir = .
 
 # (list) 需要打包的扩展名
-source.include_exts = py,png,jpg,jpeg,kv,atlas,json,db,ttf,txt,md,csv
+source.include_exts = py,png,jpg,jpeg,kv,atlas,json,db,ttf,otf,txt,md,csv
 
 # (list) 排除目录：测试 / 构建产物 / 桌面端 PySide6 UI / 文档
 source.exclude_dirs = tests,build,dist,docs,scripts,.git,app/ui,app/resources
