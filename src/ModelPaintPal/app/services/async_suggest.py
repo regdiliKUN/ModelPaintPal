@@ -16,6 +16,7 @@ from ..core.config import AppConfig
 from ..core.logging_setup import get_logger
 from ..services.coverage import CoverageInput
 from ..services.paint_matcher import PaintMatcher, PaintSuggestion
+from ..services.scheme_engine import build_scheme
 
 logger = get_logger(__name__)
 
@@ -78,6 +79,75 @@ def submit_suggest(matcher: PaintMatcher,
     ``on_error(message, token)``，让界面能区分"算错了"与"没匹配到"。
     """
     task = SuggestTask(matcher, target_rgb, config, brands, coverage_input, token)
+    task.signaller.finished.connect(on_done)
+    if on_error is not None:
+        task.signaller.failed.connect(on_error)
+    QThreadPool.globalInstance().start(task)
+    return task
+
+
+class SchemeSignaller(QObject):
+    """跨线程投递方案计算结果的信号载体。"""
+
+    finished = Signal(object, int)     # (List[SchemeStop], token)
+    failed = Signal(str, int)          # (错误描述, token)
+
+
+class SchemeTask(QRunnable):
+    """一次基础配色方案计算任务。"""
+
+    def __init__(self,
+                 matcher: PaintMatcher,
+                 base_rgb: Sequence[int],
+                 config: AppConfig,
+                 brands: Optional[List[str]],
+                 coverage_input: Optional[CoverageInput],
+                 scheme_type: str,
+                 param: int,
+                 token: int) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._matcher = matcher
+        self._base = tuple(int(c) for c in base_rgb)
+        self._config = config
+        self._brands = brands
+        self._coverage = coverage_input
+        self._scheme_type = scheme_type
+        self._param = param
+        self._token = token
+        self.signaller = SchemeSignaller()
+
+    def run(self) -> None:
+        try:
+            result = build_scheme(
+                matcher=self._matcher,
+                base_rgb=self._base,
+                config=self._config,
+                brands=self._brands,
+                coverage_input=self._coverage,
+                scheme_type=self._scheme_type,
+                param=self._param,
+            )
+        except Exception as exc:  # 任何异常都不应把工作线程带崩
+            logger.exception("配色方案计算失败: %s", exc)
+            self.signaller.failed.emit(f"{exc}" or exc.__class__.__name__, self._token)
+            return
+        self.signaller.finished.emit(result, self._token)
+
+
+def submit_scheme(matcher: PaintMatcher,
+                  base_rgb: Sequence[int],
+                  config: AppConfig,
+                  brands: Optional[List[str]],
+                  coverage_input: Optional[CoverageInput],
+                  scheme_type: str,
+                  param: int,
+                  token: int,
+                  on_done,
+                  on_error=None) -> SchemeTask:
+    """提交一次异步基础配色方案计算（接口与 ``submit_suggest`` 对齐）。"""
+    task = SchemeTask(matcher, base_rgb, config, brands, coverage_input,
+                      scheme_type, param, token)
     task.signaller.finished.connect(on_done)
     if on_error is not None:
         task.signaller.failed.connect(on_error)

@@ -310,7 +310,8 @@ class TestTabShortcuts(_WindowCase):
             menu = action.menu()
             if menu is not None and action.text() == "视图":
                 actions = [a.shortcut().toString() for a in menu.actions()]
-        self.assertEqual(actions, ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4"])
+        # 每个页签都有 Ctrl+N 快捷切换；新增「基础配色」后共 5 个页签
+        self.assertEqual(actions, ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5"])
 
 
 class TestToastStack(_WindowCase):

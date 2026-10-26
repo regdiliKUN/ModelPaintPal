@@ -28,14 +28,16 @@ from ..data.paint_db import calibrate, get_database
 from ..services.export_service import (
     copy_to_clipboard, recipe_to_text, suggestion_to_markdown, suggestions_to_json,
 )
-from ..services.async_suggest import submit_suggest
+from ..services.async_suggest import submit_scheme, submit_suggest
 from ..services.async_verify import submit_verify
 from ..services.paint_matcher import PaintMatcher, summarize
+from ..services.scheme_engine import SCHEME_LABELS, SchemeType
 from ..services.verify_service import VerifyReport, adopt
 from .panels.coverage_panel import CoveragePanel
 from .panels.verify_dialog import VerifyDialog
 from .panels.library_panel import LibraryPanel
 from .panels.pick_panel import PickPanel
+from .panels.scheme_panel import SCHEME_TAB_TITLE, SchemePanel
 from .panels.settings_panel import SettingsPanel
 from .panels.suggest_panel import SuggestPanel
 from .panels.visualize_panel import VisualizePanel
@@ -78,6 +80,13 @@ class MainWindow(QMainWindow):
         self._suggestions: list = []
         self._brand_filter: List[str] = []        # [] = 不限品牌
         self._suggest_token: int = 0              # 异步计算的去抖令牌
+
+        # 基础配色（方案）状态
+        self._scheme_stops: list = []
+        self._scheme_token: int = 0
+        self._scheme_type: str = SchemeType.BASIC
+        self._scheme_param: int = 5
+        self._scheme_dirty: bool = True           # 当前色/设置变了需重算
 
         self._picker = PickerController(self)
         self._hotkeys = HotkeyManager(self)
@@ -133,6 +142,8 @@ class MainWindow(QMainWindow):
 
         self._onboarding = OnboardingOverlay(central, self._build_onboarding_steps())
         self._suggest_panel.show_empty()
+        self._scheme_panel.set_initial_type(self._scheme_type)
+        self._scheme_panel.show_empty()
 
     def _build_left_column(self, parent: QWidget) -> QScrollArea:
         """左列（放在滚动区里：窗口偏矮时不会把数值行压成裁切）。"""
@@ -162,10 +173,12 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget(right)
         self._suggest_panel = SuggestPanel(self._tabs)
         self._visualize_panel = VisualizePanel(self._tabs)
+        self._scheme_panel = SchemePanel(self._tabs)
         self._coverage_panel = CoveragePanel(self._config, self._tabs)
         self._settings_panel = SettingsPanel(self._config, self._tabs)
         self._tabs.addTab(self._suggest_panel, "配色建议")
         self._tabs.addTab(self._visualize_panel, "色卡对比")
+        self._tabs.addTab(self._scheme_panel, SCHEME_TAB_TITLE)
         self._tabs.addTab(self._coverage_panel, "用量参数")
         self._tabs.addTab(self._settings_panel, "设置")
         right_layout.addWidget(self._tabs, 1)
@@ -288,6 +301,14 @@ class MainWindow(QMainWindow):
         self._visualize_panel.swatchClicked.connect(self._on_swatch_clicked)
         self._visualize_panel.pickRequested.connect(self._start_picking)
 
+        # 基础配色
+        self._scheme_panel.pickRequested.connect(self._start_picking)
+        self._scheme_panel.copyRecipeRequested.connect(self._on_copy_recipe)
+        self._scheme_panel.copyMarkdownRequested.connect(self._on_copy_markdown)
+        self._scheme_panel.calibrateRequested.connect(self._on_calibrate_requested)
+        self._scheme_panel.verifyRequested.connect(self._on_verify_requested)
+        self._scheme_panel.schemeTypeChanged.connect(self._on_scheme_type_changed)
+
         # 用量参数
         self._coverage_panel.configChanged.connect(self._on_coverage_changed)
 
@@ -296,6 +317,9 @@ class MainWindow(QMainWindow):
         self._settings_panel.onboardingRequested.connect(self._start_onboarding)
         self._settings_panel.databaseChanged.connect(self._on_database_changed)
         self._settings_panel.settingsChanged.connect(self._on_settings_changed)
+
+        # 切页：进入「基础配色」时按需补算
+        self._tabs.currentChanged.connect(self._on_tab_changed)
 
         # 历史 / 收藏
         self._library.colorSelected.connect(self._on_library_color_selected)
@@ -361,6 +385,7 @@ class MainWindow(QMainWindow):
         if self._config.auto_copy_on_pick and not tuned:
             copy_to_clipboard(sample.hex)
         self._request_compute(immediate=True)
+        self._request_scheme_compute()
         if tuned and self._base_rgb is not None:
             self._update_status(
                 f"微调中 {sample.hex}（原始 #{self._base_rgb[0]:02X}{self._base_rgb[1]:02X}"
@@ -441,6 +466,53 @@ class MainWindow(QMainWindow):
         self._coverage_panel.set_suggestions([])
         self._update_status(f"配色计算失败：{message}")
         show_toast(self, f"配色计算失败：{message}", "error", 4200)
+
+    # ================================================================== 基础配色
+    def _on_tab_changed(self, index: int) -> None:
+        """切到「基础配色」页且已有吸色时，按需补算。"""
+        if self._tabs.widget(index) is self._scheme_panel:
+            self._request_scheme_compute()
+
+    def _on_scheme_type_changed(self, scheme_type: str, param: int) -> None:
+        """面板切换方案类型/颜色数：记下来并重算（仅在该页可见时才会真正计算）。"""
+        self._scheme_type = scheme_type
+        self._scheme_param = param
+        self._request_scheme_compute()
+
+    def _request_scheme_compute(self) -> None:
+        """基础配色只在「基础配色」页可见时计算，避免后台空转。"""
+        if self._sample is None:
+            self._scheme_panel.show_empty()
+            return
+        if self._tabs.currentWidget() is not self._scheme_panel:
+            return
+        self._scheme_token += 1
+        token = self._scheme_token
+        self._scheme_panel.set_busy(True)
+        submit_scheme(
+            self._matcher, self._sample.rgb, self._config, self._brand_filter,
+            self._coverage_panel.coverage_input(), self._scheme_type, self._scheme_param,
+            token, self._on_scheme_ready, self._on_scheme_failed,
+        )
+
+    def _on_scheme_ready(self, stops: list, token: int) -> None:
+        if token != self._scheme_token:
+            return
+        self._scheme_stops = stops
+        self._scheme_panel.set_scheme(stops, self._sample.rgb)
+        self._update_status(
+            f"已取色 {self._sample.hex} · 基础配色：{len(stops)} 个配色点"
+            f"（{SCHEME_LABELS.get(self._scheme_type, '')}）"
+        )
+
+    def _on_scheme_failed(self, message: str, token: int) -> None:
+        if token != self._scheme_token:
+            return
+        self._scheme_stops = []
+        self._scheme_panel.set_busy(False)
+        self._scheme_panel.show_empty("基础配色计算失败", f"{message}。可以重试，或在上方换个品牌范围。")
+        self._update_status(f"基础配色计算失败：{message}")
+        show_toast(self, f"基础配色计算失败：{message}", "error", 4200)
 
     def _render_suggestions(self) -> None:
         """把已算好的建议渲染到各面板（无重计算，主线程安全）。"""
@@ -627,6 +699,7 @@ class MainWindow(QMainWindow):
         self._db = get_database(force=True)
         self._matcher = PaintMatcher(self._db)
         self._compute_now()
+        self._request_scheme_compute()
         self._refresh_db_label()
 
     def _refresh_db_label(self) -> None:
@@ -680,6 +753,7 @@ class MainWindow(QMainWindow):
         self._config.preferred_brands = list(brands)
         save_config(self._config)
         self._request_compute(immediate=True)
+        self._request_scheme_compute()
         scope = "全部品牌" if not brands else f"{len(brands)} 个品牌"
         self._update_status(f"建议范围已切换为{scope}")
 
@@ -691,11 +765,13 @@ class MainWindow(QMainWindow):
     def _on_settings_changed(self) -> None:
         """设置页改了容差/条数/模型等：立刻重算，避免"改完没生效"。"""
         self._request_compute(immediate=True)
+        self._request_scheme_compute()
         self._update_status("设置已保存，配色建议已重新计算")
 
     def _on_coverage_changed(self) -> None:
         save_config(self._config)
         self._request_compute(immediate=False)
+        self._request_scheme_compute()
 
     # ================================================================== 热键
     def _apply_hotkeys(self) -> None:
