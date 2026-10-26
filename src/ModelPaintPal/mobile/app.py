@@ -10,7 +10,6 @@ from kivy.graphics import Color, RoundedRectangle
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
-from kivy.uix.modalview import ModalView
 from kivy.uix.screenmanager import ScreenManager, SlideTransition
 
 from .bootstrap import set_user_dir
@@ -121,6 +120,7 @@ class NavBar(BoxLayout):
 class MppApp(App):
     current_rgb = None
     current_source = "manual"
+    _toast = None
 
     def build(self):
         set_user_dir(self.user_data_dir)
@@ -160,6 +160,9 @@ class MppApp(App):
             Window.bind(on_keyboard=self._on_key)
         except Exception:
             pass
+        # 给个初始色：否则顶部卡片写 #000000、手动输入框却写着 #E2AE79
+        if self.current_rgb is None:
+            self.color_set((0xE2, 0xAE, 0x79), source="manual")
 
     def _on_key(self, window, key, *args):
         if key == 27:  # ESC / 安卓返回键
@@ -190,11 +193,20 @@ class MppApp(App):
         self.set_current_color(rgb, source)
 
     def toast(self, msg):
+        """屏幕底部浮一条短提示。
+
+        注意**不要**用 ``ModalView`` 实现：它默认会盖一层 70% 黑遮罩（整个界面
+        闪一下暗），而且挂在 Window 上的模态层会干扰后续控件的绘制状态 —— 实测
+        出现「按钮只画出一小条」的渲染错乱。这里直接把一个浮动 BoxLayout 加进
+        Window 的浮层，不抢焦点、不影响布局。
+        """
         try:
-            width = min(D(320), max(Window.width - D(40), D(140)))
-            mv = ModalView(size_hint=(None, None), size=(width, D(52)),
-                           background_color=(0, 0, 0, 0), auto_dismiss=True)
-            box = BoxLayout(size_hint=(1, 1), padding=[D(10)] * 2)
+            self._drop_toast()
+            width = min(D(320), max(Window.width - D(40), D(160)))
+            height = D(52)
+            box = BoxLayout(size_hint=(None, None), size=(width, height),
+                            pos=((Window.width - width) / 2.0,
+                                 self.nav.height + D(20)))
             with box.canvas.before:
                 Color(*hex_to_kivy("#2b3342"))
                 r = RoundedRectangle(pos=box.pos, size=box.size, radius=[D(14)])
@@ -204,8 +216,17 @@ class MppApp(App):
                        font_size=S(14), halign="center", valign="middle")
             lb.bind(size=lambda inst, val: setattr(inst, "text_size", val))
             box.add_widget(lb)
-            mv.add_widget(box)
-            mv.open()
-            Clock.schedule_once(lambda dt: mv.dismiss(), 1.6)
+            Window.add_widget(box)
+            self._toast = box
+            Clock.schedule_once(lambda dt: self._drop_toast(), 1.8)
         except Exception:
             pass  # 提示失败不应影响主流程
+
+    def _drop_toast(self):
+        box, self._toast = self._toast, None
+        if box is None:
+            return
+        try:
+            Window.remove_widget(box)
+        except Exception:
+            pass

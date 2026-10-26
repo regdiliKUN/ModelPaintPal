@@ -6,71 +6,149 @@ from __future__ import annotations
 from kivy.clock import Clock
 from kivy.graphics import Color, RoundedRectangle
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.image import Image
-from kivy.uix.relativelayout import RelativeLayout
 from kivy.uix.screenmanager import Screen
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.slider import Slider
 
 from ..logic import (add_favorite, add_history, copy_text, get_config,
                      get_matcher)
+from ..photo import pick_image
 from ..theme import ACCENT, BG_ALT, D, FS_BODY, FS_SMALL, S, hex_to_kivy
 from ..widgets import (AccentButton, Card, ColorRect, Dim, Field, GhostButton,
                        Txt, Title)
 
 
 class LongPressImage(Image):
-    """长按取色：按住 0.35s 在触点取样。"""
+    """长按取色：按住 0.3s 在触点取样。
+
+    两个容易踩的点：
+
+    1. ``fit_mode="contain"`` 时图片是**居中**放在控件里的，四周留白。
+       直接拿「控件内相对位置」当「图片内相对位置」会偏（实测 300×300 控件
+       里放 200×100 的图，绘制矩形是 ``pos=(0,75) size=(300,150)``）。
+       所以先用 ``norm_image_size`` 算出真实绘制矩形再换算。
+    2. 这里**不能**在 ``on_touch_down`` 里返回 True，否则 ScrollView 拿不到
+       这一下，手指落在照片上就滑不动页面。改成返回 False，用 Window 的
+       全局事件跟踪「按住不动」，一旦移动超过阈值就当作滚动、放弃取样。
+    """
+
+    HOLD = 0.30          # 按住多久算长按
+    SLOP = 12            # 手指移动超过 dp(12) 就认为在滚动
 
     def __init__(self, owner, **kwargs):
         kwargs.setdefault("fit_mode", "contain")  # keep_ratio/allow_stretch 已弃用
         super().__init__(**kwargs)
         self.owner = owner
         self._timer = None
-        self._down_pos = None
-        self._marker = None
+        self._touch = None
+        self._down = None
+        self._bound = False
 
+    # ------------------------------------------------------------ 触摸
     def on_touch_down(self, touch):
-        if not self.collide_point(*touch.pos):
-            return super().on_touch_down(touch)
-        self._down_pos = (touch.x, touch.y)
-        self._timer = Clock.schedule_once(self._do_sample, 0.35)
-        return True
+        if not self.collide_point(*touch.pos) or self.owner.pil_image is None:
+            return False
+        self._track(touch)
+        return False        # 关键：不吃掉事件，页面还能正常滚动
 
-    def on_touch_up(self, touch):
+    def _track(self, touch):
+        from kivy.core.window import Window
+
+        self._untrack()
+        self._touch = touch
+        self._down = (touch.x, touch.y)
+        self._timer = Clock.schedule_once(self._do_sample, self.HOLD)
+        Window.bind(on_touch_move=self._on_move, on_touch_up=self._on_up)
+        self._bound = True
+
+    def _untrack(self):
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
-        self._clear_marker()
-        return super().on_touch_up(touch)
+        self._touch = None          # 不再跟踪这一根手指
+        if not self._bound:
+            return
+        self._bound = False
+        try:
+            from kivy.core.window import Window
+            Window.unbind(on_touch_move=self._on_move, on_touch_up=self._on_up)
+        except Exception:
+            pass
 
-    def _clear_marker(self):
-        if self._marker is not None:
-            self.remove_widget(self._marker)
-            self._marker = None
+    def _on_move(self, _win, touch):
+        if self._touch is None or touch.uid != self._touch.uid:
+            return
+        if self._down is None:
+            return
+        dx = abs(touch.x - self._down[0])
+        dy = abs(touch.y - self._down[1])
+        if dx > D(self.SLOP) or dy > D(self.SLOP):
+            self._untrack()          # 在滚动，不是长按
+
+    def _on_up(self, _win, touch):
+        if self._touch is None or touch.uid != self._touch.uid:
+            return
+        was_pending = self._timer is not None
+        self._untrack()
+        if was_pending:
+            self.owner.on_hold_hint()
+
+    # ------------------------------------------------------------ 取样
+    def draw_rect(self):
+        """图片在屏幕上的实际绘制矩形：(x, y, w, h)；没图时返回 None。
+
+        **必须用 ``to_window()``**：控件在 ScrollView 里时 ``self.pos`` 只是
+        内容区内的相对值（实测和窗口坐标差 1000px 以上），直接拿去做触点判定
+        会让吸色整体偏移 —— 手指点红色却取到别的颜色。
+        """
+        if not self.texture:
+            return None
+        try:
+            dw, dh = self.norm_image_size
+        except Exception:
+            return None
+        if dw <= 0 or dh <= 0:
+            return None
+        wx, wy = self.to_window(self.x, self.y)
+        return (wx + (self.width - dw) / 2.0,
+                wy + (self.height - dh) / 2.0, dw, dh)
 
     def _do_sample(self, *args):
         self._timer = None
-        if self._down_pos is None or self.owner.pil_image is None:
+        photo = self.owner.pil_image
+        rect = self.draw_rect()
+        if photo is None or rect is None or self._down is None:
             return
-        tx, ty = self._down_pos
-        rel_x = (tx - self.x) / self.width if self.width else 0
-        rel_y = 1.0 - ((ty - self.y) / self.height) if self.height else 0
-        rel_x = min(1.0, max(0.0, rel_x))
-        rel_y = min(1.0, max(0.0, rel_y))
-        w, h = self.owner.pil_image.size
-        px = self.owner.pil_image.convert("RGB").getpixel(
-            (min(w - 1, int(rel_x * w)), min(h - 1, int(rel_y * h))))
+        x0, y0, dw, dh = rect
+        tx, ty = self._down
+        if not (x0 <= tx <= x0 + dw and y0 <= ty <= y0 + dh):
+            self._untrack()
+            self.owner.on_hold_hint("请按住照片本身，四周灰色留白处不能取色")
+            return
+        rel_x = min(1.0, max(0.0, (tx - x0) / dw))
+        rel_y = min(1.0, max(0.0, 1.0 - (ty - y0) / dh))
+        w, h = photo.size
+        px = photo.getpixel((min(w - 1, int(rel_x * w)),
+                             min(h - 1, int(rel_y * h))))
         self.owner.on_sampled(px, rel_x, rel_y)
 
 
 class PickScreen(Screen):
+    # 取色区高度固定：曾经在「载入照片时把高度从 170dp 拉伸到 280dp」，
+    # 结果触发的重排让同一张卡里的「选择照片」按钮宽度塌成 26px（实测），
+    # 所以这里不给动态改高度的机会，一次定高。
+    HOLDER_H = 240
+
     def __init__(self, **kwargs):
         name = kwargs.pop("name", "pick")
         super().__init__(**kwargs)
         self.name = name
         self.pil_image = None
+        self.photo_path = None
         self._current_hex = "#000000"
+        self._syncing = False        # 程序性回填滑块时不要反算颜色
         self._build()
 
     # ----------------------------------------------------------------- 构建
@@ -127,7 +205,11 @@ class PickScreen(Screen):
         pick_btn.bind(on_release=lambda *_: self._choose_photo())
         gal.add_widget(pick_btn)
 
-        holder = RelativeLayout(size_hint_y=None, height=D(170))
+        # 用 FloatLayout 而不是 RelativeLayout：RelativeLayout 里子控件的 pos
+        # 是「相对单位」(0~1)，拿 self._img.pos 去换算屏幕坐标会得到 y=0 这种
+        # 结果，长按取样和落点标记全会错位。
+        holder = FloatLayout(size_hint_y=None, height=D(self.HOLDER_H))
+        self._holder = holder
         with holder.canvas.before:
             Color(*hex_to_kivy(BG_ALT))
             self._holder_bg = RoundedRectangle(pos=holder.pos, size=holder.size,
@@ -135,7 +217,10 @@ class PickScreen(Screen):
         holder.bind(pos=lambda inst, val: setattr(self._holder_bg, "pos", val),
                     size=lambda inst, val: setattr(self._holder_bg, "size", val))
 
-        self._img = LongPressImage(self, size_hint=(1, 1))
+        # pos_hint 必须显式给：FloatLayout 不会给没有 pos_hint 的子控件定位，
+        # 否则图片会跑到窗口左下角 (0,0)。
+        self._img = LongPressImage(self, size_hint=(1, 1),
+                                   pos_hint={"x": 0, "y": 0})
         self._img.opacity = 0
         holder.add_widget(self._img)
 
@@ -185,41 +270,26 @@ class PickScreen(Screen):
 
     # ----------------------------------------------------------------- 照片
     def _choose_photo(self):
-        try:
-            from plyer import filechooser
-            filechooser.open_file(
-                filters=[("Image", "*.jpg", "*.jpeg", "*.png")],
-                on_selection=self._on_photo_selected)
-        except Exception:
-            self.app.toast("无法打开图库（桌面端请用手动输入）")
+        self.app.toast("正在打开图库…")
+        pick_image(self._on_photo_picked)
 
-    def _on_photo_selected(self, selection):
-        if not selection:
+    def _on_photo_picked(self, photo, error):
+        if photo is None:
+            if error:                       # 取消时 error 为空，不打扰用户
+                self.app.toast(error)
             return
-        path = selection[0]
-        try:
-            from PIL import Image as PILImage
-            self.pil_image = PILImage.open(path)
-            self._img.source = path
-            self._img.reload()
-            self._img.opacity = 1
-            self._img_hint.opacity = 0
-            self.app.toast("已载入照片，长按吸色")
-        except Exception:
-            self.app.toast("照片载入失败")
+        self.pil_image = photo.pil
+        self.photo_path = photo.path
+        self._img.source = photo.path       # 每次都是新的缓存文件名，不会命中旧缓存
+        self._img.opacity = 1
+        self._img_hint.opacity = 0
+        self.app.toast("已载入照片，长按图片吸色")
+
+    def on_hold_hint(self, msg="长按照片 0.3 秒即可吸色"):
+        self.app.toast(msg)
 
     def on_sampled(self, px, rel_x, rel_y):
         self.app.color_set(px, source="screen")
-        self._img._clear_marker()
-        msize = D(24)
-        mx = self._img.x + rel_x * self._img.width
-        my = self._img.y + (1 - rel_y) * self._img.height
-        mk = ColorRect(size_hint=(None, None), size=(msize, msize),
-                       radius=[msize / 2.0])
-        mk.color = hex_to_kivy("#ffffff")
-        mk.pos = (mx - msize / 2.0, my - msize / 2.0)
-        self._img.add_widget(mk)
-        self._img._marker = mk
         self.app.toast(f"已吸色 #{px[0]:02X}{px[1]:02X}{px[2]:02X}")
 
     # ----------------------------------------------------------------- 手动
@@ -238,6 +308,8 @@ class PickScreen(Screen):
         self.app.color_set((r, g, b), source="manual")
 
     def _on_slider(self, ch, value):
+        if self._syncing:            # 由 on_color 回填时不要反过来改颜色
+            return
         rgb = [int(self._sliders[0].value), int(self._sliders[1].value),
                int(self._sliders[2].value)]
         rgb[ch] = int(value)
@@ -254,10 +326,14 @@ class PickScreen(Screen):
         self._cur_rgb.text = f"RGB {rgb[0]},{rgb[1]},{rgb[2]}"
         if self._hex_in.text.upper() != self.current_hex.upper():
             self._hex_in.text = self.current_hex
-        for i, sl in enumerate(self._sliders):
-            if int(sl.value) != rgb[i]:
-                sl.value = rgb[i]
-            self._val_labels[i].text = str(rgb[i])
+        self._syncing = True
+        try:
+            for i, sl in enumerate(self._sliders):
+                if int(sl.value) != rgb[i]:
+                    sl.value = rgb[i]
+                self._val_labels[i].text = str(rgb[i])
+        finally:
+            self._syncing = False
         try:
             m = get_matcher()
             cfg = get_config()

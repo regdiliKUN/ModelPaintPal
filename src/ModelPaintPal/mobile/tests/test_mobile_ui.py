@@ -67,9 +67,11 @@ class UISmokeTest(unittest.TestCase):
 
     def test_pick_screen_updates_on_color(self):
         scr = self.app.screens["pick"]
-        scr.on_color((226, 174, 121))
+        self.app.color_set((226, 174, 121))
         self.assertEqual(scr.current_hex, "#E2AE79")
         self.assertIsNotNone(self.app.current_rgb)
+        # 手动输入的三个滑块要跟着走，否则「吸色」和「手动」显示不一致
+        self.assertEqual([int(s.value) for s in scr._sliders], [226, 174, 121])
 
     def test_visualize_renders_grid(self):
         from app.services.paint_matcher import PaintMatcher

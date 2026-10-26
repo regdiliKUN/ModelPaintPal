@@ -25,7 +25,7 @@ source.main = main.py
 version = 1.1.0
 
 # (list) 依赖（python3 由 p4a 自动加）
-requirements = python3,kivy,pillow,plyer
+requirements = python3,kivy,pillow,plyer,jnius
 
 # (str) 应用方向
 orientation = portrait

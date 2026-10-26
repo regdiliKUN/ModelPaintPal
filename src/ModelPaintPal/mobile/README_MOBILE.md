@@ -23,6 +23,7 @@ mobile/
   fonts.py          # 中文字体注册（内置 Noto Sans SC，逐级回退系统字体）
   assets/fonts/     # 随包字体（打 APK 时一并打包）
   app.py            # Kivy App + 底部导航
+  photo.py          # 选图 + 照片载入（Android Intent/ContentResolver，桌面 tkinter）
   widgets/          # 通用控件 + 建议卡片 / 混色比例条 / 色卡网格
   screens/          # 各功能页
   main.py           # 入口
@@ -44,6 +45,22 @@ mobile/
 5. **带 `suggestion=` 等初值构造的控件要在 `__init__` 末尾主动渲染一次**，
    因为 Kivy 的 `bind` 在构造末尾才建立，初始值不会触发回调（否则卡片是空的）。
 6. 触控目标不小于 48dp；底部导航高度 `D(56)`。
+7. **选图不要用 `plyer.filechooser`**。它 Android 端只做 `intent.getData().getPath()`，
+   对 `content://media/...` 这类 URI 返回的是假路径（如 `/document/image:1234`），
+   PIL 打不开 —— 现象就是「在相册里选好照片并确认后，界面上什么都没出现」。
+   统一走 `photo.pick_image()`：自己发 Intent，用 `ContentResolver` 读字节，
+   顺带处理 EXIF 旋转、超大图缩放、缓存清理。
+8. **图片区用 `FloatLayout` 且子控件必须给 `pos_hint`**。`FloatLayout` 不会给没有
+   `pos_hint` 的子控件定位（会停在窗口原点 `(0,0)`）；而 `RelativeLayout` 里子控件的
+   `pos` 是 0~1 的相对单位，拿去算屏幕坐标会得到 `y=0` 这种结果。
+9. **换算屏幕坐标一律用 `widget.to_window(x, y)`**，不要直接拿 `pos` 加偏移：
+   控件在 ScrollView 里时 `pos` 只是内容区内的局部值，实测和窗口坐标差 1000px 以上，
+   会让吸色整体偏移（手指点红色取到别的颜色）。
+10. **不要在运行时改「卡片里某个固定高度子控件」的高度**。实测把取色区从 170dp
+    拉到 280dp 会触发重排，把同一张卡里的按钮宽度压成 26px（正常 1328px）。
+    需要多大就在建的时候定好。
+11. **Toast 不要用 `ModalView` 实现**。它默认带一层 70% 黑遮罩（弹一次提示整个界面
+    暗一下），还会干扰后续绘制。`app.toast()` 已经把浮层直接挂到 `Window` 上。
 
 ## 本地桌面调试
 ```bash
@@ -73,5 +90,9 @@ python -m unittest discover -s mobile/tests -p "test_*.py" -v
 - `test_mobile_logic.py`：核心移植功能（建议 / 调配 / 覆盖率 / 收藏 / 导出 / 校准），无需图形界面即可运行。
 - `test_mobile_ui.py`：界面冒烟 + **适配回归**（字号必须按 sp 缩放、卡片高度不能塌陷、
   导航满足 48dp 触摸目标）。
+- `test_mobile_photo.py`：选图与吸色回归（字节→照片→界面整链路、EXIF 摆正、
+  缓存清理、`contain` 居中留白的坐标映射、拖动不该触发取样、图片必须真的可见）。
 - 无头环境跑 UI 测试需指定窗口后端：`KIVY_WINDOW=sdl2 python -m unittest ...`，
   否则 Kivy 在 import 阶段会静默崩溃。
+- 注意用 `discover` 形式运行：`python -m unittest discover -s src/ModelPaintPal/mobile/tests -t src`。
+  直接 `-m unittest 模块名` 在本机会因 Kivy 的 stdout 代理而**一行输出都没有**。
