@@ -10,7 +10,8 @@ from app.core.config import AppConfig
 from app.data.paint_db import get_database
 from app.services.paint_matcher import PaintMatcher, PaintSuggestion
 from app.services.scheme_engine import (
-    SchemeType, build_scheme, default_param_for, generate_scheme_colors,
+    SchemeType, build_scheme, compute_base_mix, default_param_for,
+    generate_scheme_colors,
 )
 
 RED = (255, 0, 0)
@@ -117,6 +118,50 @@ class SchemeEngineTest(unittest.TestCase):
         for stop in stops:
             if stop.suggestion is not None:
                 self.assertEqual(stop.suggestion.anchor.brand_key, "tamiya")
+
+
+class BaseMixTest(unittest.TestCase):
+    """基础漆调配：把任意目标色分解为红/黄/蓝/白/黑五瓶的配比。"""
+
+    def setUp(self):
+        self.db = get_database()
+        self.matcher = PaintMatcher(self.db)
+        self.config = AppConfig()
+
+    def _mix(self, rgb, total=20):
+        return compute_base_mix(rgb, self.config, brands=[], matcher=self.matcher,
+                                total_drops=total)
+
+    def test_returns_five_components(self):
+        recipe = self._mix((120, 80, 60))
+        self.assertEqual(len(recipe.components), 5)
+        roles = [c.role for c in recipe.components]
+        self.assertEqual(roles, ["红", "黄", "蓝", "白", "黑"])
+
+    def test_weights_sum_to_one(self):
+        recipe = self._mix((120, 80, 60))
+        total = sum(c.weight for c in recipe.components)
+        self.assertAlmostEqual(total, 1.0, delta=1e-6)
+
+    def test_drops_sum_to_total(self):
+        recipe = self._mix((120, 80, 60), total=20)
+        self.assertEqual(sum(c.drops for c in recipe.components), 20)
+
+    def test_white_target_is_white_dominant(self):
+        recipe = self._mix(WHITE, total=20)
+        white = next(c for c in recipe.components if c.role == "白")
+        self.assertGreater(white.percent, 80.0)
+
+    def test_red_target_is_red_dominant(self):
+        recipe = self._mix(RED, total=20)
+        red = next(c for c in recipe.components if c.role == "红")
+        self.assertGreater(red.percent, 80.0)
+
+    def test_each_component_has_real_paint_suggestion(self):
+        recipe = self._mix((120, 80, 60))
+        for c in recipe.components:
+            self.assertIsNotNone(c.suggestion, c.role)
+            self.assertIsNotNone(c.suggestion.anchor)
 
 
 if __name__ == "__main__":

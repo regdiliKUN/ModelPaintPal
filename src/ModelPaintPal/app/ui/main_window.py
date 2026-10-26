@@ -28,10 +28,10 @@ from ..data.paint_db import calibrate, get_database
 from ..services.export_service import (
     copy_to_clipboard, recipe_to_text, suggestion_to_markdown, suggestions_to_json,
 )
-from ..services.async_suggest import submit_scheme, submit_suggest
+from ..services.async_suggest import submit_mix, submit_suggest
 from ..services.async_verify import submit_verify
 from ..services.paint_matcher import PaintMatcher, summarize
-from ..services.scheme_engine import SCHEME_LABELS, SchemeType
+from ..services.scheme_engine import MixRecipe
 from ..services.verify_service import VerifyReport, adopt
 from .panels.coverage_panel import CoveragePanel
 from .panels.verify_dialog import VerifyDialog
@@ -81,12 +81,10 @@ class MainWindow(QMainWindow):
         self._brand_filter: List[str] = []        # [] = 不限品牌
         self._suggest_token: int = 0              # 异步计算的去抖令牌
 
-        # 基础配色（方案）状态
-        self._scheme_stops: list = []
+        # 基础配色（五瓶基础漆调配）状态
+        self._mix_recipe: Optional[MixRecipe] = None
         self._scheme_token: int = 0
-        self._scheme_type: str = SchemeType.BASIC
-        self._scheme_param: int = 5
-        self._scheme_dirty: bool = True           # 当前色/设置变了需重算
+        self._total_drops: int = int(getattr(self._config, "drop_total", 20) or 20)
 
         self._picker = PickerController(self)
         self._hotkeys = HotkeyManager(self)
@@ -142,7 +140,6 @@ class MainWindow(QMainWindow):
 
         self._onboarding = OnboardingOverlay(central, self._build_onboarding_steps())
         self._suggest_panel.show_empty()
-        self._scheme_panel.set_initial_type(self._scheme_type)
         self._scheme_panel.show_empty()
 
     def _build_left_column(self, parent: QWidget) -> QScrollArea:
@@ -174,6 +171,7 @@ class MainWindow(QMainWindow):
         self._suggest_panel = SuggestPanel(self._tabs)
         self._visualize_panel = VisualizePanel(self._tabs)
         self._scheme_panel = SchemePanel(self._tabs)
+        self._scheme_panel.set_total_drops(self._total_drops)
         self._coverage_panel = CoveragePanel(self._config, self._tabs)
         self._settings_panel = SettingsPanel(self._config, self._tabs)
         self._tabs.addTab(self._suggest_panel, "配色建议")
@@ -307,7 +305,7 @@ class MainWindow(QMainWindow):
         self._scheme_panel.copyMarkdownRequested.connect(self._on_copy_markdown)
         self._scheme_panel.calibrateRequested.connect(self._on_calibrate_requested)
         self._scheme_panel.verifyRequested.connect(self._on_verify_requested)
-        self._scheme_panel.schemeTypeChanged.connect(self._on_scheme_type_changed)
+        self._scheme_panel.mixRequested.connect(self._on_mix_requested)
 
         # 用量参数
         self._coverage_panel.configChanged.connect(self._on_coverage_changed)
@@ -385,7 +383,7 @@ class MainWindow(QMainWindow):
         if self._config.auto_copy_on_pick and not tuned:
             copy_to_clipboard(sample.hex)
         self._request_compute(immediate=True)
-        self._request_scheme_compute()
+        self._request_mix_compute()
         if tuned and self._base_rgb is not None:
             self._update_status(
                 f"微调中 {sample.hex}（原始 #{self._base_rgb[0]:02X}{self._base_rgb[1]:02X}"
@@ -471,16 +469,15 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         """切到「基础配色」页且已有吸色时，按需补算。"""
         if self._tabs.widget(index) is self._scheme_panel:
-            self._request_scheme_compute()
+            self._request_mix_compute()
 
-    def _on_scheme_type_changed(self, scheme_type: str, param: int) -> None:
-        """面板切换方案类型/颜色数：记下来并重算（仅在该页可见时才会真正计算）。"""
-        self._scheme_type = scheme_type
-        self._scheme_param = param
-        self._request_scheme_compute()
+    def _on_mix_requested(self, total_drops: int) -> None:
+        """面板改了总滴数或点了重算：记下来并重算（仅在该页可见时才会真正计算）。"""
+        self._total_drops = int(total_drops)
+        self._request_mix_compute()
 
-    def _request_scheme_compute(self) -> None:
-        """基础配色只在「基础配色」页可见时计算，避免后台空转。"""
+    def _request_mix_compute(self) -> None:
+        """基础配色（五瓶基础漆调配）只在「基础配色」页可见时计算，避免后台空转。"""
         if self._sample is None:
             self._scheme_panel.show_empty()
             return
@@ -489,26 +486,26 @@ class MainWindow(QMainWindow):
         self._scheme_token += 1
         token = self._scheme_token
         self._scheme_panel.set_busy(True)
-        submit_scheme(
+        submit_mix(
             self._matcher, self._sample.rgb, self._config, self._brand_filter,
-            self._coverage_panel.coverage_input(), self._scheme_type, self._scheme_param,
-            token, self._on_scheme_ready, self._on_scheme_failed,
+            self._coverage_panel.coverage_input(), self._total_drops,
+            token, self._on_mix_ready, self._on_mix_failed,
         )
 
-    def _on_scheme_ready(self, stops: list, token: int) -> None:
+    def _on_mix_ready(self, recipe: MixRecipe, token: int) -> None:
         if token != self._scheme_token:
             return
-        self._scheme_stops = stops
-        self._scheme_panel.set_scheme(stops, self._sample.rgb)
+        self._mix_recipe = recipe
+        self._scheme_panel.set_mix_recipe(recipe, self._sample.rgb)
         self._update_status(
-            f"已取色 {self._sample.hex} · 基础配色：{len(stops)} 个配色点"
-            f"（{SCHEME_LABELS.get(self._scheme_type, '')}）"
+            f"已取色 {self._sample.hex} · 基础配色：红/黄/蓝/白/黑五瓶调配"
+            f"（近似 ΔE {recipe.delta_e:.1f}）"
         )
 
-    def _on_scheme_failed(self, message: str, token: int) -> None:
+    def _on_mix_failed(self, message: str, token: int) -> None:
         if token != self._scheme_token:
             return
-        self._scheme_stops = []
+        self._mix_recipe = None
         self._scheme_panel.set_busy(False)
         self._scheme_panel.show_empty("基础配色计算失败", f"{message}。可以重试，或在上方换个品牌范围。")
         self._update_status(f"基础配色计算失败：{message}")
@@ -699,7 +696,7 @@ class MainWindow(QMainWindow):
         self._db = get_database(force=True)
         self._matcher = PaintMatcher(self._db)
         self._compute_now()
-        self._request_scheme_compute()
+        self._request_mix_compute()
         self._refresh_db_label()
 
     def _refresh_db_label(self) -> None:
@@ -753,7 +750,7 @@ class MainWindow(QMainWindow):
         self._config.preferred_brands = list(brands)
         save_config(self._config)
         self._request_compute(immediate=True)
-        self._request_scheme_compute()
+        self._request_mix_compute()
         scope = "全部品牌" if not brands else f"{len(brands)} 个品牌"
         self._update_status(f"建议范围已切换为{scope}")
 
@@ -765,13 +762,13 @@ class MainWindow(QMainWindow):
     def _on_settings_changed(self) -> None:
         """设置页改了容差/条数/模型等：立刻重算，避免"改完没生效"。"""
         self._request_compute(immediate=True)
-        self._request_scheme_compute()
+        self._request_mix_compute()
         self._update_status("设置已保存，配色建议已重新计算")
 
     def _on_coverage_changed(self) -> None:
         save_config(self._config)
         self._request_compute(immediate=False)
-        self._request_scheme_compute()
+        self._request_mix_compute()
 
     # ================================================================== 热键
     def _apply_hotkeys(self) -> None:

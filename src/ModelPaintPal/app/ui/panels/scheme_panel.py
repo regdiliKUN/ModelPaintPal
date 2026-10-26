@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
-"""基础配色面板：方案类型选择 + 色盘预览 + 每个方案色的真实漆配方。
+"""基础配色面板：把吸到的目标色分解成「红/黄/蓝/白/黑」五瓶基础漆的调配配方。
 
-吸到一个颜色后，这里把"红黄蓝之类的基础配色"展开成具体方案，并给每个方案色
-找一份库内最适配的真实漆配方（复用 ``SuggestionCard``）。计算走异步，
-与建议页互不阻塞。
+核心诉求：用户手头只有这五瓶基础漆，想知道"用这几瓶怎么调出当前吸到的颜色"。
+因此本页不展示互不相关的色卡，而是给出——
+
+  * 一条混色条：红/黄/蓝/白/黑按配比占满同一条，直接看出各占百分之多少；
+  * 每瓶基础漆对应的整数滴数；
+  * 每瓶基础漆在库内最适配的真实漆（牌子可以有区别，但漆就这五瓶）。
+
+计算走异步，与建议页互不阻塞。
 """
 
 from __future__ import annotations
@@ -11,20 +16,18 @@ from __future__ import annotations
 from typing import List, Sequence
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy,
-    QSpinBox, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 
-from ...core.color_models import rgb_to_hex
+from ...core.color_models import normalize_rgb, rgb_to_hex
 from ...services.paint_matcher import PaintSuggestion
-from ...services.scheme_engine import (
-    SCHEME_LABELS, SCHEME_ORDER, SchemeStop,
-)
+from ...services.scheme_engine import MixRecipe
 from ..theme import Palette
-from ..widgets.color_wheel import ColorWheelCard, WheelMarker
+from ..widgets.ratio_bar import RatioBarCard, RatioSegment
 from ..widgets.empty_state import EmptyState
-from .suggestion_card import SuggestionCard
 
 __all__ = ["SchemePanel", "SCHEME_TAB_TITLE"]
 
@@ -32,61 +35,78 @@ SCHEME_TAB_TITLE = "基础配色"
 
 _EMPTY_TITLE = "还没有取样"
 _EMPTY_DESC = ("点击左侧「开始吸色」，或按全局快捷键从任意窗口/图片上取一个颜色。"
-               "取色后这里会给出红黄蓝之类的基础配色，以及每个配色对应的真实漆。")
+               "取色后这里会把它分解成一瓶红、一瓶黄、一瓶蓝、一瓶白、一瓶黑"
+               "的调配比例（同一条混色条 + 各占百分之多少 + 各几滴）。")
 
 
-class _SchemeGroup(QFrame):
-    """一个方案色：表头（角色 + 目标色值 + 最佳配方摘要）+ 配方卡片。"""
+def _swatch(rgb: Sequence[int], size: int = 18) -> QLabel:
+    """一个纯色方块（不带文字）。"""
+    r, g, b = normalize_rgb(rgb)
+    lab = QLabel()
+    lab.setFixedSize(size, size)
+    lab.setStyleSheet(
+        f"background:{QColor(r, g, b).name()};"
+        f"border:1px solid {Palette.border_strong};border-radius:3px;")
+    return lab
+
+
+class _MixRow(QFrame):
+    """一行：一瓶基础漆 → 占比 / 滴数 / 库内推荐真实漆。"""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 12)
-        layout.setSpacing(8)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 6, 10, 6)
+        row.setSpacing(8)
 
-        self._header = QLabel("")
-        self._header.setObjectName("SectionLabel")
-        self._header.setWordWrap(True)
-        layout.addWidget(self._header)
+        self._swatch = _swatch((200, 30, 35))
+        row.addWidget(self._swatch)
 
-        self._card = SuggestionCard(self)
-        layout.addWidget(self._card)
+        self._role = QLabel("")
+        self._role.setObjectName("SectionLabel")
+        self._role.setFixedWidth(28)
+        row.addWidget(self._role)
 
-    def set_stop(self, stop: SchemeStop, base_rgb: Sequence[int]) -> None:
-        self._stop = stop
-        role = stop.role
-        if stop.suggestion is not None:
-            sug: PaintSuggestion = stop.suggestion
-            anchor = sug.anchor
-            summary = (f"{anchor.full_label} {anchor.name} · ΔE {sug.delta_e:.2f}"
-                       f"（{sug.mode_label}）")
+        row.addSpacing(6)
+        self._ratio = QLabel("")
+        self._ratio.setObjectName("DimLabel")
+        self._ratio.setFixedWidth(120)
+        row.addWidget(self._ratio)
+
+        self._rec = QLabel("")
+        self._rec.setWordWrap(True)
+        row.addWidget(self._rec, 1)
+
+    def set_component(self, comp, total_drops: int) -> None:
+        r, g, b = normalize_rgb(comp.base_rgb)
+        self._swatch.setStyleSheet(
+            f"background:{QColor(r, g, b).name()};"
+            f"border:1px solid {Palette.border_strong};border-radius:3px;")
+        self._role.setText(comp.role)
+        pct = comp.drops / total_drops * 100.0 if total_drops else 0.0
+        self._ratio.setText(f"占 {pct:.0f}%  ·  {comp.drops} 滴")
+
+        sug: PaintSuggestion = comp.suggestion
+        if sug is not None:
+            a = sug.anchor
+            self._rec.setText(
+                f"推荐真实漆：{a.brand_label} {a.code} {a.name} · ΔE {sug.delta_e:.2f}")
         else:
-            summary = "库内暂无可用配方"
-        self._header.setText(f"{role}  ·  目标 {stop.target_hex}  →  {summary}")
-        if stop.suggestion is not None:
-            self._card.setVisible(True)
-            self._card.set_suggestion(stop.suggestion, stop.target_rgb)
-        else:
-            self._card.setVisible(False)
-
-    def connect_signals(self, panel: "SchemePanel") -> None:
-        self._card.copyRecipeRequested.connect(panel.copyRecipeRequested.emit)
-        self._card.copyMarkdownRequested.connect(panel.copyMarkdownRequested.emit)
-        self._card.calibrateRequested.connect(panel.calibrateRequested.emit)
-        self._card.verifyRequested.connect(panel.verifyRequested.emit)
+            self._rec.setText("推荐真实漆：当前品牌范围内暂无匹配")
 
 
 class SchemePanel(QFrame):
-    """基础配色面板。"""
+    """基础配色面板（五瓶基础漆调配计算器）。"""
 
     pickRequested = Signal()
     copyRecipeRequested = Signal(object)
     copyMarkdownRequested = Signal(object)
     calibrateRequested = Signal(object)
     verifyRequested = Signal(object)
-    # (scheme_type, param) —— 由主窗口据此重新计算方案
     schemeTypeChanged = Signal(str, int)
+    # (总滴数) —— 由主窗口据此重新计算配方
+    mixRequested = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -95,9 +115,6 @@ class SchemePanel(QFrame):
         layout.setSpacing(10)
 
         layout.addWidget(self._build_toolbar())
-
-        self._wheel = ColorWheelCard("基础配色预览（色环定位）", self)
-        layout.addWidget(self._wheel)
 
         self._scroll = QScrollArea(self)
         self._scroll.setWidgetResizable(True)
@@ -117,9 +134,9 @@ class SchemePanel(QFrame):
         layout.addWidget(self._empty, 1)
         self._scroll.setVisible(False)
 
-        self._groups: List[_SchemeGroup] = []
+        self._build_body()
+        self._total_drops = 20
         self._busy = False
-        self._current_type = SCHEME_ORDER[0][0]
 
     # ------------------------------------------------------------------ 工具条
     def _build_toolbar(self) -> QFrame:
@@ -130,33 +147,22 @@ class SchemePanel(QFrame):
         row.setContentsMargins(12, 8, 12, 8)
         row.setSpacing(8)
 
-        label = QLabel("配色类型")
+        label = QLabel("总滴数")
         label.setObjectName("DimLabel")
         row.addWidget(label)
 
-        self._type_combo = QComboBox()
-        for key, lbl, _ in SCHEME_ORDER:
-            self._type_combo.addItem(lbl, key)
-        self._type_combo.setToolTip("把吸到的颜色展开成哪类基础配色")
-        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
-        row.addWidget(self._type_combo)
-
-        self._param_label = QLabel("色数")
-        self._param_label.setObjectName("DimLabel")
-        row.addWidget(self._param_label)
-        self._param_spin = QSpinBox()
-        self._param_spin.setRange(3, 7)
-        self._param_spin.setValue(5)
-        self._param_spin.setToolTip("邻近色/单色系的层次数量")
-        self._param_spin.valueChanged.connect(self._on_param_changed)
-        row.addWidget(self._param_spin)
-        self._param_label.setVisible(False)
-        self._param_spin.setVisible(False)
+        self._drops_spin = QSpinBox()
+        self._drops_spin.setRange(4, 100)
+        self._drops_spin.setValue(20)
+        self._drops_spin.setSuffix(" 滴")
+        self._drops_spin.setToolTip("整套配方的总滴数；占比按此换算成滴数")
+        self._drops_spin.valueChanged.connect(self._on_drops_changed)
+        row.addWidget(self._drops_spin)
 
         self._refresh = QPushButton("重算")
         self._refresh.setObjectName("GhostButton")
-        self._refresh.setToolTip("用当前吸色重新计算方案")
-        self._refresh.clicked.connect(self._on_refresh)
+        self._refresh.setToolTip("用当前吸色重新计算配比")
+        self._refresh.clicked.connect(lambda: self.mixRequested.emit(self._total_drops))
         row.addWidget(self._refresh)
 
         row.addStretch(1)
@@ -166,82 +172,93 @@ class SchemePanel(QFrame):
         row.addWidget(self._count_label)
         return bar
 
-    # ------------------------------------------------------------------ 交互
-    def _on_type_changed(self, index: int) -> None:
-        key = self._type_combo.itemData(index)
-        if key is None:
-            return
-        self._current_type = key
-        uses_param = key in ("analogous", "monochromatic")
-        self._param_label.setVisible(uses_param)
-        self._param_spin.setVisible(uses_param)
-        self.schemeTypeChanged.emit(key, self._current_param())
+    def _on_drops_changed(self, value: int) -> None:
+        self._total_drops = value
+        self.mixRequested.emit(value)
 
-    def _on_param_changed(self, _value: int) -> None:
-        self.schemeTypeChanged.emit(self._current_type, self._current_param())
+    # ------------------------------------------------------------------ 主体
+    def _build_body(self) -> None:
+        # 目标色 / 近似色 对照
+        head = QFrame(self._container)
+        head.setObjectName("Card")
+        h = QHBoxLayout(head)
+        h.setContentsMargins(12, 10, 12, 10)
+        h.setSpacing(12)
 
-    def _on_refresh(self) -> None:
-        self.schemeTypeChanged.emit(self._current_type, self._current_param())
+        self._target_swatch = _swatch((220, 220, 220), 26)
+        self._target_label = QLabel("目标色")
+        self._target_label.setObjectName("SectionLabel")
+        h.addWidget(self._target_swatch)
+        h.addWidget(self._target_label)
 
-    def _current_param(self) -> int:
-        if self._current_type in ("analogous", "monochromatic"):
-            return self._param_spin.value()
-        return 0
+        h.addSpacing(10)
+        arrow = QLabel("→")
+        arrow.setObjectName("FaintLabel")
+        h.addWidget(arrow)
+        h.addSpacing(10)
 
-    def set_initial_type(self, scheme_type: str) -> None:
-        """由主窗口在启动时同步默认类型。"""
-        idx = self._type_combo.findData(scheme_type)
-        if idx >= 0:
-            self._type_combo.blockSignals(True)
-            self._type_combo.setCurrentIndex(idx)
-            self._type_combo.blockSignals(False)
-        self._current_type = scheme_type
-        uses_param = scheme_type in ("analogous", "monochromatic")
-        self._param_label.setVisible(uses_param)
-        self._param_spin.setVisible(uses_param)
+        self._pred_swatch = _swatch((220, 220, 220), 26)
+        self._pred_label = QLabel("调出近似色")
+        self._pred_label.setObjectName("SectionLabel")
+        h.addWidget(self._pred_swatch)
+        h.addWidget(self._pred_label)
+
+        h.addStretch(1)
+        self._de_label = QLabel("")
+        self._de_label.setObjectName("FaintLabel")
+        h.addWidget(self._de_label)
+        self._container_layout.addWidget(head)
+
+        # 混色条：红/黄/蓝/白/黑 占满同一条
+        self._bar = RatioBarCard("基础漆配比（同一条混色 · 红/黄/蓝/白/黑）", self._container)
+        self._container_layout.addWidget(self._bar)
+
+        # 每瓶基础漆一行
+        self._rows: List[_MixRow] = []
+        for _ in range(5):
+            row = _MixRow(self._container)
+            self._container_layout.addWidget(row)
+            self._rows.append(row)
 
     # ------------------------------------------------------------------ 渲染
-    def set_scheme(self, stops: Sequence[SchemeStop],
-                   base_rgb: Sequence[int]) -> None:
-        if not stops:
-            self._hide_groups()
-            self._show_empty("没有可用方案",
-                             "当前品牌范围内没有可参与调配的色号。试着在建议页切到「全部品牌」"
-                             "，或到设置里放宽金属漆/透明漆的限制。")
+    def set_mix_recipe(self, recipe: MixRecipe, target_rgb: Sequence[int]) -> None:
+        if recipe is None:
+            self._show_empty("没有可用配方", "当前品牌范围内没有可参与调配的色号。")
             return
         self._empty.setVisible(False)
-        self._wheel.setVisible(True)
         self._scroll.setVisible(True)
-        self._render_wheel(stops, base_rgb)
-        self._ensure_groups(len(stops))
-        for group, stop in zip(self._groups, stops):
-            group.set_stop(stop, base_rgb)
-            group.setVisible(True)
-        for group in self._groups[len(stops):]:
-            group.setVisible(False)
         self.set_busy(False)
-        self._count_label.setText(
-            f"{len(stops)} 个配色点 · {SCHEME_LABELS.get(self._current_type, '')}")
 
-    def _render_wheel(self, stops: Sequence[SchemeStop],
-                      base_rgb: Sequence[int]) -> None:
-        markers = [WheelMarker(base_rgb, "吸取值", emphasis=True, index=0)]
-        legend = [f"吸取值 {rgb_to_hex(base_rgb)}"]
-        for i, stop in enumerate(stops, start=1):
-            markers.append(WheelMarker(stop.target_rgb, stop.role, index=i))
-            legend.append(f"{'①②③④⑤⑥⑦'[i-1]} {stop.role} {stop.target_hex}")
-        self._wheel.set_markers(markers, "  ·  ".join(legend))
+        t_r, t_g, t_b = normalize_rgb(target_rgb)
+        self._target_swatch.setStyleSheet(
+            f"background:{QColor(t_r, t_g, t_b).name()};"
+            f"border:1px solid {Palette.border_strong};border-radius:3px;")
+        self._target_label.setText(f"目标 {rgb_to_hex(target_rgb)}")
+        p_r, p_g, p_b = normalize_rgb(recipe.predicted_rgb)
+        self._pred_swatch.setStyleSheet(
+            f"background:{QColor(p_r, p_g, p_b).name()};"
+            f"border:1px solid {Palette.border_strong};border-radius:3px;")
+        self._pred_label.setText(f"近似 {rgb_to_hex(recipe.predicted_rgb)}")
+        self._de_label.setText(f"色差 ΔE {recipe.delta_e:.1f}（五瓶内最接近）")
 
-    def _ensure_groups(self, count: int) -> None:
-        while len(self._groups) < count:
-            group = _SchemeGroup(self._container)
-            group.connect_signals(self)
-            self._container_layout.addWidget(group)
-            self._groups.append(group)
+        segments = []
+        for comp in recipe.components:
+            if comp.drops > 0:
+                pct = comp.drops / recipe.total_drops * 100.0
+                segments.append(RatioSegment(
+                    rgb=comp.base_rgb, label=comp.role,
+                    percent=comp.drops,
+                    detail=f"{comp.drops}滴 · {pct:.0f}%"))
+        self._bar.set_segments(
+            segments,
+            legend=f"总滴数 {recipe.total_drops} · 按配比调匀即得近似色"
+                   f"（ΔE {recipe.delta_e:.1f}）")
 
-    def _hide_groups(self) -> None:
-        for group in self._groups:
-            group.setVisible(False)
+        for row, comp in zip(self._rows, recipe.components):
+            row.setVisible(True)
+            row.set_component(comp, recipe.total_drops)
+
+        self._count_label.setText("红/黄/蓝/白/黑 五瓶基础漆")
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -253,10 +270,18 @@ class SchemePanel(QFrame):
             self._count_label.setStyleSheet(
                 f"color: {Palette.text_faint}; background: transparent;")
 
+    def set_initial_type(self, scheme_type: str) -> None:
+        """兼容主窗口启动时调用（本页已无方案类型下拉，留作空操作）。"""
+        return
+
+    def set_total_drops(self, total: int) -> None:
+        """由主窗口在启动时按配置同步总滴数。"""
+        self._drops_spin.blockSignals(True)
+        self._drops_spin.setValue(int(total))
+        self._drops_spin.blockSignals(False)
+        self._total_drops = int(total)
+
     def show_empty(self, title: str = _EMPTY_TITLE, description: str = "") -> None:
-        self._hide_groups()
-        self._wheel.clear()
-        self._wheel.setVisible(False)
         self._show_empty(title, description or _EMPTY_DESC)
 
     def _show_empty(self, title: str, description: str) -> None:

@@ -16,12 +16,15 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 from ..core.color_models import (
-    hsl_to_rgb, hsv_to_rgb, normalize_rgb, rgb_to_hex, rgb_to_hsl, rgb_to_hsv,
+    hsl_to_rgb, hsv_to_rgb, linear_to_rgb, normalize_rgb, rgb_to_hex, rgb_to_hsl,
+    rgb_to_hsv, rgb_to_lab, rgb_to_linear,
 )
 from ..core.config import AppConfig
+from ..core.delta_e import delta_e as _delta_e
 from ..core.logging_setup import get_logger
 from ..services.coverage import CoverageInput
-from ..services.paint_matcher import PaintMatcher, PaintSuggestion
+from ..services.paint_matcher import PaintMatcher, PaintSuggestion, get_database
+from ..services.recipe_engine import proportions_to_drops
 
 logger = get_logger(__name__)
 
@@ -31,6 +34,8 @@ __all__ = [
     "SchemeType", "SCHEME_ORDER", "SCHEME_LABELS", "SCHEME_DESC",
     "SchemeColor", "SchemeStop", "generate_scheme_colors", "build_scheme",
     "default_param_for",
+    # 基础漆调配（把任意目标色分解为红/黄/蓝/白/黑五瓶的配比）
+    "MixRecipe", "MixComponent", "compute_base_mix",
 ]
 
 
@@ -234,3 +239,169 @@ def build_scheme(matcher: PaintMatcher,
         best = suggestions[0] if suggestions else None
         stops.append(SchemeStop(role=color.role, target_rgb=color.rgb, suggestion=best))
     return stops
+
+
+# ---------------------------------------------------------------------------
+# 基础漆调配：把任意目标色分解为红/黄/蓝/白/黑五瓶基础漆的配比
+# ---------------------------------------------------------------------------
+@dataclass
+class MixComponent:
+    """配方里的一个基础漆组分（红/黄/蓝/白/黑）。"""
+
+    role: str                       # 红 / 黄 / 蓝 / 白 / 黑
+    base_rgb: RGB                   # 该基础漆的理想色（用于画混色条）
+    weight: float                   # 0-1 体积分数
+    percent: float                  # 百分比
+    drops: int                     # 整数滴数
+    suggestion: Optional[PaintSuggestion] = None  # 库内最适配的真实漆（含品牌）
+
+    @property
+    def target_hex(self) -> str:
+        return rgb_to_hex(self.base_rgb)
+
+
+@dataclass
+class MixRecipe:
+    """一份"用五瓶基础漆调出目标色"的配方。"""
+
+    target_rgb: RGB
+    predicted_rgb: RGB              # 按配比混出的近似色
+    delta_e: float                  # 近似色与目标色的色差
+    total_drops: int
+    components: List[MixComponent]
+
+
+# 五瓶基础漆的"理想色"——只用于减法混合计算与混色条着色，不参与真实漆匹配。
+# 红/黄/蓝取纯正的画家基色，白/黑为极亮/极暗的无彩色。
+_BASE_PAINTS: List[Tuple[str, RGB]] = [
+    ("红", (200, 30, 35)),
+    ("黄", (230, 200, 45)),
+    ("蓝", (35, 70, 200)),
+    ("白", (244, 244, 244)),
+    ("黑", (18, 18, 18)),
+]
+
+
+def _srgb_to_ks(rgb: RGB) -> Tuple[float, float, float]:
+    """sRGB 反射率 → Kubelka-Munk 的 K/S（每通道）。"""
+    r, g, b = rgb_to_linear(rgb)
+    out = []
+    for c in (r, g, b):
+        c = max(0.003, min(0.997, c))       # 避免除零 / 无穷
+        out.append((1.0 - c) ** 2 / (2.0 * c))
+    return (out[0], out[1], out[2])
+
+
+def _ks_to_srgb(ks: Sequence[float]) -> RGB:
+    """K/S → sRGB 反射率，反解 R = 1 + x - sqrt(x² + 2x)。"""
+    out = []
+    for k in ks:
+        k = max(0.0, float(k))
+        r = 1.0 + k - (k * k + 2.0 * k) ** 0.5
+        out.append(max(0.0, min(1.0, r)))
+    return linear_to_rgb((out[0], out[1], out[2]))
+
+
+def _project_simplex(v: Sequence[float]) -> List[float]:
+    """把向量投影到单纯形 {w≥0, Σw=1}（欧氏距离最小）。"""
+    n = len(v)
+    if n == 1:
+        return [max(0.0, x) for x in v]
+    if sum(v) <= 0:
+        return [1.0 / n] * n
+    u = sorted(v, reverse=True)
+    cssv = []
+    acc = 0.0
+    for x in u:
+        acc += x
+        cssv.append(acc)
+    rho = 1
+    for i in range(1, n + 1):
+        if u[i - 1] - (cssv[i - 1] - 1.0) / i > 0:
+            rho = i
+    theta = (cssv[rho - 1] - 1.0) / rho
+    return [max(0.0, x - theta) for x in v]
+
+
+def _solve_mix_weights(target_ks: Sequence[float],
+                       A: Sequence[Sequence[float]],
+                       weights: Optional[Sequence[float]] = None) -> List[float]:
+    """求 5 瓶基础漆的体积分数 w（≥0, Σw=1），使 K/S 减法混色最接近目标。
+
+    纯 Python 投影梯度下降 + 单纯形投影（不依赖 numpy/scipy）：
+    混色在 K/S 空间对 w 是线性的，故这是加权最小二乘，梯度下降稳定收敛。
+
+    ``weights`` 给每通道不同的重要度：默认按 1/(K/S+ε) 加权，让"高反射（亮）
+    通道"权重更大，避免亮色被黑/深色拉暗（否则纯红会被误算成红+大量黑）。
+    """
+    n = len(A[0])
+    w = [1.0 / n] * n
+    t = list(target_ks)
+    if weights is None:
+        weights = [1.0 / (t[c] + 0.1) for c in range(3)]
+    W = list(weights)
+    for _ in range(3000):
+        aw = [sum(A[r][c] * w[c] for c in range(n)) for r in range(3)]
+        resid = [aw[r] - t[r] for r in range(3)]
+        g = [2.0 * sum(A[r][c] * W[r] * resid[r] for r in range(3)) for c in range(n)]
+        if max(abs(x) for x in g) < 1e-9:
+            break
+        d = [-x for x in g]
+        ad = [sum(A[r][c] * d[c] for c in range(n)) for r in range(3)]
+        denom = 2.0 * sum(W[r] * ad[r] * ad[r] for r in range(3))
+        if denom <= 0:
+            break
+        alpha = sum(x * x for x in g) / denom
+        w = _project_simplex([w[c] - alpha * g[c] for c in range(n)])
+    if sum(w) <= 0:
+        w = [1.0 / n] * n
+    return w
+
+
+def compute_base_mix(target_rgb: Sequence[int],
+                     config: AppConfig,
+                     brands: Optional[Sequence[str]] = None,
+                     coverage_input: Optional[CoverageInput] = None,
+                     matcher: Optional[PaintMatcher] = None,
+                     total_drops: Optional[int] = None) -> MixRecipe:
+    """把任意目标色分解为红/黄/蓝/白/黑五瓶基础漆的配比。
+
+    - 用 Kubelka-Munk 减法混色在 K/S 空间求 5 瓶的体积分数；
+    - 把配比换算成百分比与整数滴数（``total_drops`` 缺省取 ``config.drop_total``）；
+    - 为每瓶基础漆在库内找最适配的真实漆（跟随品牌范围），从而做到"漆就这五瓶，
+      但牌子可以有区别"。
+    """
+    target = normalize_rgb(target_rgb)
+    if matcher is None:
+        matcher = PaintMatcher(get_database())
+    if total_drops is None:
+        total_drops = int(getattr(config, "drop_total", 20) or 20)
+
+    target_ks = _srgb_to_ks(target)
+    base_ks = [_srgb_to_ks(rgb) for _, rgb in _BASE_PAINTS]   # 5 个 (r,g,b)
+    A = [[base_ks[c][r] for c in range(len(_BASE_PAINTS))] for r in range(3)]  # 3×5
+
+    weights = _solve_mix_weights(target_ks, A)
+    mixed_ks = [sum(weights[c] * base_ks[c][r] for c in range(len(_BASE_PAINTS)))
+                for r in range(3)]
+    predicted = _ks_to_srgb(mixed_ks)
+    de = _delta_e(rgb_to_lab(target), rgb_to_lab(predicted))
+
+    percents = [w * 100.0 for w in weights]
+    drops = proportions_to_drops(weights, total_drops)
+
+    components: List[MixComponent] = []
+    for (role, base), w, p, d in zip(_BASE_PAINTS, weights, percents, drops):
+        sug = None
+        try:
+            sugg_list = matcher.suggest(
+                target_rgb=base, config=config, brands=brands,
+                coverage_input=coverage_input, max_results=1,
+            )
+            sug = sugg_list[0] if sugg_list else None
+        except Exception as exc:  # 单瓶匹配失败不应拖垮整份配方
+            logger.exception("基础漆 %s 求真实漆失败: %s", role, exc)
+        components.append(MixComponent(role=role, base_rgb=base, weight=w,
+                                      percent=p, drops=d, suggestion=sug))
+    return MixRecipe(target_rgb=target, predicted_rgb=predicted, delta_e=de,
+                     total_drops=total_drops, components=components)

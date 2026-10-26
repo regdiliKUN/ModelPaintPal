@@ -16,7 +16,7 @@ from ..core.config import AppConfig
 from ..core.logging_setup import get_logger
 from ..services.coverage import CoverageInput
 from ..services.paint_matcher import PaintMatcher, PaintSuggestion
-from ..services.scheme_engine import build_scheme
+from ..services.scheme_engine import build_scheme, compute_base_mix
 
 logger = get_logger(__name__)
 
@@ -148,6 +148,71 @@ def submit_scheme(matcher: PaintMatcher,
     """提交一次异步基础配色方案计算（接口与 ``submit_suggest`` 对齐）。"""
     task = SchemeTask(matcher, base_rgb, config, brands, coverage_input,
                       scheme_type, param, token)
+    task.signaller.finished.connect(on_done)
+    if on_error is not None:
+        task.signaller.failed.connect(on_error)
+    QThreadPool.globalInstance().start(task)
+    return task
+
+
+class MixSignaller(QObject):
+    """跨线程投递基础漆调配结果的信号载体。"""
+
+    finished = Signal(object, int)     # (MixRecipe, token)
+    failed = Signal(str, int)          # (错误描述, token)
+
+
+class MixTask(QRunnable):
+    """一次基础漆调配计算任务（把目标色分解为红/黄/蓝/白/黑配比）。"""
+
+    def __init__(self,
+                 matcher: PaintMatcher,
+                 target_rgb: Sequence[int],
+                 config: AppConfig,
+                 brands: Optional[List[str]],
+                 coverage_input: Optional[CoverageInput],
+                 total_drops: int,
+                 token: int) -> None:
+        super().__init__()
+        self.setAutoDelete(True)
+        self._matcher = matcher
+        self._target = tuple(int(c) for c in target_rgb)
+        self._config = config
+        self._brands = brands
+        self._coverage = coverage_input
+        self._total = int(total_drops)
+        self._token = token
+        self.signaller = MixSignaller()
+
+    def run(self) -> None:
+        try:
+            result = compute_base_mix(
+                target_rgb=self._target,
+                config=self._config,
+                brands=self._brands,
+                coverage_input=self._coverage,
+                matcher=self._matcher,
+                total_drops=self._total,
+            )
+        except Exception as exc:  # 任何异常都不应把工作线程带崩
+            logger.exception("基础漆调配计算失败: %s", exc)
+            self.signaller.failed.emit(f"{exc}" or exc.__class__.__name__, self._token)
+            return
+        self.signaller.finished.emit(result, self._token)
+
+
+def submit_mix(matcher: PaintMatcher,
+               target_rgb: Sequence[int],
+               config: AppConfig,
+               brands: Optional[List[str]],
+               coverage_input: Optional[CoverageInput],
+               total_drops: int,
+               token: int,
+               on_done,
+               on_error=None) -> MixTask:
+    """提交一次异步基础漆调配计算（接口与 ``submit_suggest`` 对齐）。"""
+    task = MixTask(matcher, target_rgb, config, brands, coverage_input,
+                   total_drops, token)
     task.signaller.finished.connect(on_done)
     if on_error is not None:
         task.signaller.failed.connect(on_error)
