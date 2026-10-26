@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 **/userdata/
 **/userdata_backup*/
+.mobile_userdata/
 src/ModelPaintPal/build/
 src/ModelPaintPal/dist/
 *.log

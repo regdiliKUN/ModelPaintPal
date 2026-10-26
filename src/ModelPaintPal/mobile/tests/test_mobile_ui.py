@@ -1,0 +1,87 @@
+# -*- coding: utf-8 -*-
+"""移动端界面冒烟测试：构建完整控件树并驱动各页渲染（无需真实显示）。
+
+本测试不调用 ``App.run()``，因此不会创建 GL 窗口，可在无头环境运行；
+它验证所有页面能正确构建、各计算结果能渲染为控件、且不抛异常。
+"""
+
+import os
+import sys
+import unittest
+from pathlib import Path
+
+os.environ.setdefault("KIVY_NO_CONSOLELOG", "1")
+os.environ.setdefault("KIVY_NO_ARGS", "1")
+
+ROOT = Path(__file__).resolve().parents[2]  # src/ModelPaintPal
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import mobile.bootstrap  # noqa: E402  —— 先重定向用户目录
+_ = mobile.bootstrap.ROOT  # 确保路径重定向副作用已执行
+import mobile.app as appmod  # noqa: E402  —— 触发整套前端导入（不应引入 PySide6）
+from kivy.app import App  # noqa: E402
+from mobile import logic  # noqa: E402  —— 核心访问器（get_db/get_config/get_matcher）
+
+
+class UISmokeTest(unittest.TestCase):
+    def setUp(self):
+        # 构造 App 但不运行（不创建 GL 窗口）
+        self.app = appmod.MppApp()
+        App._running_app = self.app  # 让各页的 app 属性可解析（仅测试用）
+        self.root = self.app.build()
+
+    def test_app_builds_all_screens(self):
+        self.assertEqual(len(self.app.screens), 9)
+        for name in ("pick", "suggest", "visualize", "mix", "more",
+                     "coverage", "library", "settings", "about"):
+            self.assertIn(name, self.app.screens)
+
+    def test_full_widget_tree_constructed(self):
+        from kivy.uix.boxlayout import BoxLayout
+        self.assertIsInstance(self.root, BoxLayout)
+        self.assertIsNotNone(self.app.nav)
+        self.assertIsNotNone(self.app.sm)
+
+    def test_suggest_screen_renders_cards(self):
+        from app.services.paint_matcher import PaintMatcher
+        rgb = (226, 174, 121)
+        matcher = PaintMatcher(logic.get_db())
+        sug = matcher.suggest(rgb, logic.get_config(), brands=[])
+        scr = self.app.screens["suggest"]
+        scr._on_done(sug)
+        self.assertGreater(len(scr._list.children), 0,
+                          "建议页应渲染出卡片")
+
+    def test_mix_screen_renders_bar(self):
+        from app.services.scheme_engine import compute_base_mix
+        cfg = logic.get_config()
+        matcher = logic.get_matcher()
+        recipe = compute_base_mix((226, 174, 121), cfg, brands=[],
+                                  matcher=matcher, total_drops=20)
+        scr = self.app.screens["mix"]
+        scr._on_done(recipe)
+        self.assertEqual(len(scr._bar.segments), 5,
+                         "混色比例条应有 5 段（红/黄/蓝/白/黑）")
+        self.assertGreater(len(scr._inner.children), 0)
+
+    def test_pick_screen_updates_on_color(self):
+        scr = self.app.screens["pick"]
+        scr.on_color((226, 174, 121))
+        self.assertEqual(scr.current_hex, "#E2AE79")
+        self.assertIsNotNone(self.app.current_rgb)
+
+    def test_visualize_renders_grid(self):
+        from app.services.paint_matcher import PaintMatcher
+        rgb = (120, 80, 60)
+        matcher = PaintMatcher(logic.get_db())
+        sug = matcher.suggest(rgb, logic.get_config(), brands=[])
+        self.app.current_rgb = rgb
+        scr = self.app.screens["visualize"]
+        scr._on_done(sug)
+        # _inner 内应有色卡对比卡片
+        self.assertGreater(len(scr._inner.children), 0)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
