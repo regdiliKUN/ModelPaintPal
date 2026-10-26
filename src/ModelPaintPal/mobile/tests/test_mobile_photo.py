@@ -10,6 +10,7 @@ PIL 打不开 → 掉进异常分支 → 图片区永远停在「尚未选择照
 import io
 import os
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -281,6 +282,44 @@ class ScreenWiringTest(unittest.TestCase):
     def test_cancel_is_silent(self):
         self.scr._on_photo_picked(None, "")
         self.assertEqual(self.toasts, [], "用户取消不该弹提示")
+
+
+class PickAndDeliverTest(unittest.TestCase):
+    """选图入口的两个约定：回调必须回主线程、连点不能弹两次图库。"""
+
+    def test_callback_is_marshalled_to_main_thread(self):
+        """Android 上解码在后台线程完成，回调必须经 Clock 切回主线程。
+
+        直接在子线程里调回调会改 Kivy 控件状态 —— 轻则界面不刷新，
+        重则整段绘制指令崩掉，所以这一层必须有人守着。
+        """
+        from kivy.clock import Clock
+
+        box = {}
+        worker = threading.Thread(
+            target=lambda: photomod._deliver(
+                lambda photo, error: box.update(photo=photo, error=error), "P", ""))
+        worker.start()
+        worker.join()
+
+        self.assertEqual(box, {}, "回调跑到后台线程里去了")
+        Clock.tick()
+        self.assertEqual(box.get("photo"), "P")
+        self.assertEqual(box.get("error"), "")
+
+    def test_double_tap_opens_one_picker(self):
+        calls = []
+        saved_pick, saved_android = photomod._pick_desktop, photomod.is_android
+        photomod.is_android = lambda: False
+        photomod._pick_desktop = lambda finish: calls.append(finish)
+        try:
+            photomod.pick_image(lambda photo, error: None)
+            photomod.pick_image(lambda photo, error: None)
+        finally:
+            photomod._pick_desktop, photomod.is_android = saved_pick, saved_android
+            photomod._pending = False            # 上面故意没有回调，手动复位
+
+        self.assertEqual(len(calls), 1, "连点两下弹了两次图库")
 
 
 if __name__ == "__main__":
