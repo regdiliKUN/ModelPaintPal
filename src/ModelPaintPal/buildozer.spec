@@ -43,6 +43,13 @@ android.buildozer_version = 1.5.0
 # (bool) 私有存储（用户数据写入 App 私有目录）
 android.private_storage = True
 
+# (bool) 自动接受 SDK 许可：CI 无人值守构建必须开启，否则会卡在交互提示
+android.accept_sdk_license = True
+
+# (list) 目标架构：只编 arm64-v8a（现代手机均支持），构建时间约减半
+# 需要兼容老机型时改成：arm64-v8a, armeabi-v7a
+android.archs = arm64-v8a
+
 # (str) p4a 分支（稳定）
 p4a.branch = master
 
