@@ -25,6 +25,21 @@ class TestConfigFromDict(unittest.TestCase):
         self.assertIsInstance(cfg.preferred_brands, list)
         self.assertTrue(len(cfg.preferred_brands) > 0)
 
+    def test_mix_brands_default_is_single_tamiya(self):
+        cfg = AppConfig.from_dict({})
+        # 基础配色默认统一到单一品牌（田宫），而不是混搭
+        self.assertEqual(cfg.mix_brands, ["tamiya"])
+
+    def test_mix_brands_blank_means_mix_and_match(self):
+        # 空列表 = 混搭（各瓶可来自不同品牌），是合法持久化状态，不应被纠正成单品牌
+        cfg = AppConfig.from_dict({"mix_brands": []})
+        self.assertEqual(cfg.mix_brands, [])
+
+    def test_mix_brands_non_list_falls_back(self):
+        cfg = AppConfig.from_dict({"mix_brands": "tamiya"})  # 应为 list
+        self.assertIsInstance(cfg.mix_brands, list)
+        self.assertEqual(cfg.mix_brands, ["tamiya"])
+
     def test_unknown_keys_ignored(self):
         cfg = AppConfig.from_dict({"totally_unknown": 123, "theme": "dark"})
         self.assertEqual(cfg.theme, "dark")

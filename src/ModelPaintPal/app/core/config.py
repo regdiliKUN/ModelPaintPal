@@ -79,6 +79,8 @@ class AppConfig:
     preferred_brands: List[str] = field(default_factory=lambda: [
         "tamiya", "mr_hobby_h", "mr_color_c", "vallejo_mc", "ak_3gen",
     ])
+    # 基础配色页「五瓶基础漆」统一到单一品牌；空列表 = 混搭（各瓶可来自不同品牌）
+    mix_brands: List[str] = field(default_factory=lambda: ["tamiya"])
     allow_metallic_in_mix: bool = False
     allow_clear_in_mix: bool = False
     allow_cross_brand_mix: bool = False  # 默认只在同一产品线内混配
@@ -181,6 +183,8 @@ class AppConfig:
         self.window_height = max(600, min(1600, int(self.window_height)))
         if not isinstance(self.preferred_brands, list):
             self.preferred_brands = ["tamiya"]
+        if not isinstance(self.mix_brands, list):
+            self.mix_brands = ["tamiya"]
         return self
 
 

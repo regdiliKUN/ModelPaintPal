@@ -18,11 +18,12 @@ from typing import List, Sequence
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-    QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ...core.color_models import normalize_rgb, rgb_to_hex
+from ...data.brands import BRANDS, brand_keys
 from ...services.paint_matcher import PaintSuggestion
 from ...services.scheme_engine import MixRecipe
 from ..theme import Palette
@@ -107,6 +108,8 @@ class SchemePanel(QFrame):
     schemeTypeChanged = Signal(str, int)
     # (总滴数) —— 由主窗口据此重新计算配方
     mixRequested = Signal(int)
+    # (品牌键列表) —— 基础漆统一到的品牌；空列表 = 混搭（各瓶可来自不同品牌）
+    brandChanged = Signal(list)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -147,6 +150,21 @@ class SchemePanel(QFrame):
         row.setContentsMargins(12, 8, 12, 8)
         row.setSpacing(8)
 
+        brand_label = QLabel("基础漆品牌")
+        brand_label.setObjectName("DimLabel")
+        row.addWidget(brand_label)
+
+        self._brand_combo = QComboBox()
+        # 第一项「混搭」= 不限品牌（各瓶可来自不同品牌）；其余每个品牌一个单选
+        self._brand_combo.addItem("混搭（全部品牌）", "__all__")
+        for key in brand_keys():
+            self._brand_combo.addItem(BRANDS[key].short, key)
+        self._brand_combo.setToolTip(
+            "把五瓶基础漆（红/黄/蓝/白/黑）统一到单一品牌；"
+            "选「混搭」则每瓶可分别来自不同品牌")
+        self._brand_combo.currentIndexChanged.connect(self._on_brand_changed)
+        row.addWidget(self._brand_combo)
+
         label = QLabel("总滴数")
         label.setObjectName("DimLabel")
         row.addWidget(label)
@@ -175,6 +193,26 @@ class SchemePanel(QFrame):
     def _on_drops_changed(self, value: int) -> None:
         self._total_drops = value
         self.mixRequested.emit(value)
+
+    def _on_brand_changed(self, _index: int) -> None:
+        key = self._brand_combo.currentData()
+        if key == "__all__":
+            self.brandChanged.emit([])
+        else:
+            self.brandChanged.emit([key])
+
+    def set_brand(self, brands: Sequence[str]) -> None:
+        """按当前选中的品牌回填下拉（主窗口从配置载入后调用）。
+
+        ``brands`` 为空列表表示「混搭」；含一个品牌键表示单一品牌。
+        """
+        if not brands:
+            target = "__all__"
+        else:
+            target = brands[0]
+        idx = self._brand_combo.findData(target)
+        if idx >= 0:
+            self._brand_combo.setCurrentIndex(idx)
 
     # ------------------------------------------------------------------ 主体
     def _build_body(self) -> None:

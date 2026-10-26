@@ -24,6 +24,7 @@ from ..core.history_store import HistoryStore
 from ..core.hotkeys import HotkeyManager
 from ..core.logging_setup import get_logger
 from ..core.sample_record import SampleRecord
+from ..data.brands import BRANDS
 from ..data.paint_db import calibrate, get_database
 from ..services.export_service import (
     copy_to_clipboard, recipe_to_text, suggestion_to_markdown, suggestions_to_json,
@@ -84,6 +85,8 @@ class MainWindow(QMainWindow):
         # 基础配色（五瓶基础漆调配）状态
         self._mix_recipe: Optional[MixRecipe] = None
         self._scheme_token: int = 0
+        # 基础漆统一到的品牌；空列表 = 混搭（各瓶可来自不同品牌）
+        self._mix_brands: List[str] = list(getattr(self._config, "mix_brands", []) or [])
         self._total_drops: int = int(getattr(self._config, "drop_total", 20) or 20)
 
         self._picker = PickerController(self)
@@ -172,6 +175,7 @@ class MainWindow(QMainWindow):
         self._visualize_panel = VisualizePanel(self._tabs)
         self._scheme_panel = SchemePanel(self._tabs)
         self._scheme_panel.set_total_drops(self._total_drops)
+        self._scheme_panel.set_brand(self._mix_brands)
         self._coverage_panel = CoveragePanel(self._config, self._tabs)
         self._settings_panel = SettingsPanel(self._config, self._tabs)
         self._tabs.addTab(self._suggest_panel, "配色建议")
@@ -306,6 +310,7 @@ class MainWindow(QMainWindow):
         self._scheme_panel.calibrateRequested.connect(self._on_calibrate_requested)
         self._scheme_panel.verifyRequested.connect(self._on_verify_requested)
         self._scheme_panel.mixRequested.connect(self._on_mix_requested)
+        self._scheme_panel.brandChanged.connect(self._on_mix_brand_changed)
 
         # 用量参数
         self._coverage_panel.configChanged.connect(self._on_coverage_changed)
@@ -487,7 +492,7 @@ class MainWindow(QMainWindow):
         token = self._scheme_token
         self._scheme_panel.set_busy(True)
         submit_mix(
-            self._matcher, self._sample.rgb, self._config, self._brand_filter,
+            self._matcher, self._sample.rgb, self._config, self._mix_brands,
             self._coverage_panel.coverage_input(), self._total_drops,
             token, self._on_mix_ready, self._on_mix_failed,
         )
@@ -497,9 +502,10 @@ class MainWindow(QMainWindow):
             return
         self._mix_recipe = recipe
         self._scheme_panel.set_mix_recipe(recipe, self._sample.rgb)
+        scope = self._mix_brand_label()
         self._update_status(
             f"已取色 {self._sample.hex} · 基础配色：红/黄/蓝/白/黑五瓶调配"
-            f"（近似 ΔE {recipe.delta_e:.1f}）"
+            f"（{scope} · 近似 ΔE {recipe.delta_e:.1f}）"
         )
 
     def _on_mix_failed(self, message: str, token: int) -> None:
@@ -510,6 +516,21 @@ class MainWindow(QMainWindow):
         self._scheme_panel.show_empty("基础配色计算失败", f"{message}。可以重试，或在上方换个品牌范围。")
         self._update_status(f"基础配色计算失败：{message}")
         show_toast(self, f"基础配色计算失败：{message}", "error", 4200)
+
+    def _on_mix_brand_changed(self, brands: List[str]) -> None:
+        """基础配色页切换「基础漆品牌」：记录并落盘，立即重算。"""
+        self._mix_brands = list(brands)
+        self._config.mix_brands = list(brands)
+        save_config(self._config)
+        self._request_mix_compute()
+
+    def _mix_brand_label(self) -> str:
+        """基础配色页当前品牌范围文案。"""
+        if not self._mix_brands:
+            return "混搭（全部品牌）"
+        return " / ".join(
+            BRANDS[b].short for b in self._mix_brands if b in BRANDS
+        ) or "混搭（全部品牌）"
 
     def _render_suggestions(self) -> None:
         """把已算好的建议渲染到各面板（无重计算，主线程安全）。"""
