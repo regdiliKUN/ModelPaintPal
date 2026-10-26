@@ -196,8 +196,10 @@ class ZoomPickImage(FloatLayout):
     所以取样一律先把触点夹到图片矩形内，而不是拒绝并提示 ——
     留白处也能吸到最边上的那个像素，不会再有「点了边框」的挫败感。
 
-    坐标一律用**控件局部坐标**（``touch.pos - self.pos``），因为那正是
-    ``canvas`` 画图用的坐标系；见 :meth:`to_local_point` 里的踩坑记录。
+    坐标一律换算成**控件局部坐标**再取样，转换分两步（见 :meth:`to_local_point`）：
+    先用 ``touch.sx/sy`` 还原手指的**窗口像素坐标**，再减去控件在窗口里的
+    **真实绘制原点**（``get_window_matrix()``）。**不能**用 ``touch.pos - self.pos``
+    —— 那两套坐标压根不是一个空间。
 
     为什么按压点上方没有「准星」浮层：实测**照片这个 Image 会盖住同层级的
     所有控件**（holder 里的兄弟、它自己的子控件都一样），浮层怎么摆都被照片
@@ -213,6 +215,7 @@ class ZoomPickImage(FloatLayout):
         self._touch = None
         self._scroll = None
         self._scroll_state = None
+        self._origin = None      # 按下时的窗口原点；滚动已冻结，整段手势不变
         self.sampling = False
         self.sample_center = (0.0, 0.0)
 
@@ -268,30 +271,77 @@ class ZoomPickImage(FloatLayout):
         """图片在**控件局部坐标**里的绘制矩形：(x, y, w, h)；没图时 None。"""
         return self._local_image_rect()
 
-    def to_local_point(self, touch):
-        """触摸坐标 → 控件局部坐标。
+    def window_point(self, touch):
+        """触点所在的**窗口像素坐标**（左下角原点）。
 
-        **这是整套取色最关键的一行**。Kivy 把 ``touch.pos`` 派发给子控件时，
-        坐标已经被沿路的容器（尤其是 ScrollView 的 ``g_translate``）平移过，
-        其原点和 ``self.pos`` 是同一套；而 ``canvas`` 画图用的也是这套坐标。
+        ``touch.pos`` 不能用：它会被沿路容器改写（ScrollView 的
+        ``on_scroll_start`` / ``simulate_touch_down`` 里都会
+        ``touch.apply_transform_2d(self.to_local)`` 平移一次），而且
+        **按下走控件树、拖动和抬手走 Window 事件，两边的坐标系还不一样**
+        —— 同一个手指位置，按下时读出 1180，拖动时读出 1886，差 700px。
+        于是拖动/抬手那一下必然吸到别处去，这也是「取色点永远偏离手指」的根因。
 
-        换句话说：``touch.pos - self.pos`` 才是手指在控件内的位置。
-        以前这里错用了「窗口坐标」的图片矩形去比 ``touch.pos``，
-        实测两者纵向差了 706px（滚动越多差越大），比整张照片还高 ——
-        于是每次都被判成「点在图外」，v 被夹到边上，吸到的是图片另一头的颜色，
-        旧版本还会弹一句「不要点边框」。
+        ``sx`` / ``sy`` 是归一化窗口坐标，``apply_transform_2d`` 只改
+        x/y/px/py/ox/oy，**从不改 sx/sy**（见 kivy.input.motionevent），
+        而 ``scale_for_screen()`` 是拿 sx/sy 反算出 x/y 的 —— 也就是说
+        sx/sy 才是手指的真位置，乘回窗口尺寸即可，任何变换都动不了它。
         """
-        return touch.x - self.x, touch.y - self.y
+        from kivy.core.window import Window
+
+        w = Window.width or 1.0
+        h = Window.height or 1.0
+        try:
+            # 和 scale_for_screen() 用同一个换算，屏幕旋转时也对
+            return touch.to_absolute_pos(touch.sx, touch.sy, w, h,
+                                         int(getattr(Window, "rotation", 0)))
+        except (AttributeError, ValueError, TypeError):
+            return touch.sx * w, touch.sy * h
+
+    def window_origin(self):
+        """本控件左下角在**窗口**里的像素位置 —— 和画到屏幕上完全一致。
+
+        ``self.pos`` 是**父容器坐标**，跟实际画在哪隔着整条布局链（实测
+        差 546px：``self.pos`` 是 (28,731)，屏幕上却在 (56,1277)）。
+        ``to_window()`` 也不能用：ScrollView 只重写了 ``to_local/to_parent``
+        去补 ``g_translate``，不含各级父容器偏移，实测返回的就是 g_translate。
+
+        ``get_window_matrix()`` 是 Kivy 画图真正用的那个矩阵，拿它算出来的
+        原点与截图里照片的真实像素位置只差 1px（截图实测 435 vs 436）。
+        """
+        try:
+            m = self.get_window_matrix()
+            x, y, _ = m.transform_point(0, 0, 0)
+            return x, y
+        except Exception:                       # 没有窗口/纹理还没就绪
+            return self.x, self.y
+
+    def to_local_point(self, touch, origin=None):
+        """触摸 → **控件局部坐标**（左下角原点，和 canvas 同一套）。
+
+        两套坐标必须各归各位：手指位置一律取窗口坐标，控件原点一律取绘制
+        原点，相减才是「手指在控件里的哪儿」。以前写成 ``touch.pos - self.pos``
+        ——前者被 ScrollView 平移过、后者是父容器坐标，两个偏移并不会抵消，
+        结果就是用户看到的那样：按在照片中间，取到的却是照片另一头。
+        """
+        if origin is None:
+            origin = self._origin if self._origin is not None else self.window_origin()
+        wx, wy = self.window_point(touch)
+        return wx - origin[0], wy - origin[1]
 
     # ------------------------------------------------------------ 触摸
     def on_touch_down(self, touch):
-        if self.owner.pil_image is None or not self.collide_point(*touch.pos):
+        if self.owner.pil_image is None or self._touch is not None:
             return False
-        if self._touch is not None:          # 已经有一根手指在取色
+        # 命中判定也必须在窗口坐标里做：collide_point 比的是 self.pos（父容器
+        # 坐标），和手指所在的窗口坐标差着整条布局链，按下点会整体错开。
+        origin = self.window_origin()
+        lx, ly = self.to_local_point(touch, origin)
+        if not (0 <= lx <= self.width and 0 <= ly <= self.height):
             return False
+        self._origin = origin
         self._touch = touch
         self._freeze_scroll(True)
-        self._update(*self.to_local_point(touch))
+        self._update(lx, ly)
 
         from kivy.core.window import Window
         Window.bind(on_touch_move=self._on_move, on_touch_up=self._on_up)
@@ -316,6 +366,7 @@ class ZoomPickImage(FloatLayout):
 
     def _end(self):
         self._touch = None
+        self._origin = None
         self._freeze_scroll(False)
         self._mark(None, None)
         try:

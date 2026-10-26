@@ -65,13 +65,31 @@ mobile/
     「ContentResolver 读字节 → `Image.open` → EXIF 摆正 → 缩到 2560 → 存 PNG」
     在低端机上是 1~3 秒，卡在主线程既有明显冻结，也可能触发系统 ANR。
     `photo.py` 用后台线程做这一段，结果再经 `Clock.schedule_once` 切回主线程回调。
-13. **在控件里取手指位置要用 `touch.pos - self.pos`，不是窗口坐标**。
-    `touch.pos` 派发到控件时已被沿途容器平移过（ScrollView 的 `g_translate`
-    最狠），其原点和 `self.pos` 是同一套 —— 这正好也是 `canvas` 画图用的坐标系。
-    拿 `to_window()` 换算出的窗口矩形去比 `touch.pos`，实测纵向差 706px
-    （比整张照片还高），于是每次都被判成「点在图外」，取样点被夹到边缘、
-    吸到图片另一头的颜色。第 9 条说的是「控件坐标 → 窗口坐标」，
-    这里是反方向，别混用。
+13. **取手指位置只认 `touch.sx/sy`；控件原点只认 `get_window_matrix()`**。
+    这条踩过两次，第一次只修对一半，实机上仍报「取到的颜色在手指右下方
+    很远的地方」：
+    - `touch.pos` **不是**窗口坐标。`ScrollView.on_scroll_start` /
+      `simulate_touch_down` 都会 `touch.apply_transform_2d(self.to_local)`
+      平移一次；更麻烦的是**按下走控件树、拖动和抬手走 `Window` 事件**，
+      两边的坐标系还不一样 —— 同一手指位置实测按下读 1180、拖动读 1886，
+      差 706px。所以「按下用 touch.pos、拖动也用 touch.pos」的写法，
+      拖动和抬手必然吸到别处。
+    - `self.pos` 是**父容器坐标**，和屏幕上画的位置隔着整条布局链：实测
+      `self.pos=(28,731)`，照片实际画在 `(56,1277)`，差 546px；页面一滚动
+      差得更多，所以偏移量会**随滚动变大**，方向固定偏向一边。
+    - `to_window()` 在这里也不能用：ScrollView 只重写了 `to_local/to_parent`
+      去补 `g_translate`，不含各级父容器偏移，实测返回值就等于 `g_translate`。
+    正确写法（`ZoomPickImage.window_point` / `window_origin`）：
+      * 手指窗口坐标 = `touch.sx * Window.width, touch.sy * Window.height`。
+        `apply_transform_2d` 只改 x/y/px/py/ox/oy，**从不改 sx/sy**，而
+        `scale_for_screen()` 本来就是拿 sx/sy 反算 x/y 的 —— sx/sy 才是真位置。
+      * 控件窗口原点 = `get_window_matrix().transform_point(0, 0, 0)`，与截图
+        像素实测只差 1px（截图 436 / 矩阵 435）。滚动后它跟着变（实测
+        scroll_y 1.0→0.55 时原点 1277→1089），**每按一次重新取**。
+      * 按下时缓存原点（此时已冻结滚动），`on_touch_move/up` 复用它，
+        保证整段手势自始至终在同一套坐标里。
+      * 命中判定也别用 `collide_point(*touch.pos)`（它比的是 `self.pos`），
+        换算成局部坐标后再判 `0 <= x <= width`。
 14. **`Line` 在这个环境里画不出来**。`Line(circle=...)`、`Line(points=...)`
     放在图片上/旁边一律不渲染，而且 `Line.circle` 只可写不可读（读回 `None`，
     没法用它做状态判断）。要图形就用 `ColorRect`，或干脆用 PIL 画进图片
@@ -131,7 +149,9 @@ python -m unittest discover -s mobile/tests -p "test_*.py" -v
   导航满足 48dp 触摸目标）。
 - `test_mobile_photo.py`：选图与吸色回归（字节→照片→界面整链路、EXIF 摆正、
   缓存清理、`contain` 居中留白的坐标映射、按下即取样 / 拖动跟手 / 抬手只提交一次、
-  取色期间不能滚动页面、放大图中心必须就是取到的那个像素、留白处夹取不报错）。
+  取色期间不能滚动页面、放大图中心必须就是取到的那个像素、留白处夹取不报错、
+  **坐标系**：控件画在窗口 (120,900) 而 `self.pos=(0,0)` 时仍要取对颜色、
+  `touch.pos` 被平移 700px 也不影响、拖动与按下必须是同一套坐标）。
 - 无头环境跑 UI 测试需指定窗口后端：`KIVY_WINDOW=sdl2 python -m unittest ...`，
   否则 Kivy 在 import 阶段会静默崩溃。
 - 注意用 `discover` 形式运行：`python -m unittest discover -s src/ModelPaintPal/mobile/tests -t src`。

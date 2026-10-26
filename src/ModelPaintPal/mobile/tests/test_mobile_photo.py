@@ -132,16 +132,49 @@ class _FakeOwner:
 
 
 class _Touch:
-    """够用的触摸替身：只需要 uid / x / y / pos。"""
+    """够用的触摸替身：uid / x / y / sx / sy / pos。
 
-    def __init__(self, x, y, uid=1):
+    ``sx`` / ``sy`` 是手指真实所在的归一化窗口坐标；``x`` / ``y`` 是 Kivy
+    派发时可能被容器改写过的值 —— ``shift`` 就是用来模拟那种平移的
+    （实机实测按下与拖动能差 700px）。取样只认 sx/sy。
+    """
+
+    def __init__(self, x, y, uid=1, shift=(0.0, 0.0)):
+        from kivy.core.window import Window
+
         self.uid = uid
-        self.x = x
-        self.y = y
+        self.sx = x / float(Window.width or 1.0)
+        self.sy = y / float(Window.height or 1.0)
+        self.x = x + shift[0]
+        self.y = y + shift[1]
+
+    def move_to(self, x, y, shift=(0.0, 0.0)):
+        from kivy.core.window import Window
+
+        self.sx = x / float(Window.width or 1.0)
+        self.sy = y / float(Window.height or 1.0)
+        self.x = x + shift[0]
+        self.y = y + shift[1]
 
     @property
     def pos(self):
         return (self.x, self.y)
+
+
+class _PlacedImage(ZoomPickImage):
+    """把「控件画在窗口的哪儿」和 ``self.pos`` 拆开，用来钉住坐标系。
+
+    实机上这两者本来就不同：``self.pos`` 是父容器坐标 (28,731)，屏幕上却在
+    (56,1277)。把 origin 显式钉成 (120,900)，一旦有人把取样改回
+    ``touch.pos - self.pos``，这些用例会立刻红。
+    """
+
+    def __init__(self, *args, origin=(0.0, 0.0), **kwargs):
+        self._fake_origin = origin
+        super().__init__(*args, **kwargs)
+
+    def window_origin(self):
+        return self._fake_origin
 
 
 class SampleMappingTest(unittest.TestCase):
@@ -152,8 +185,9 @@ class SampleMappingTest(unittest.TestCase):
     def setUp(self):
         self.photo = photomod._load_bytes(make_quad_bytes())
         self.owner = _FakeOwner(self.photo.pil)
-        self.img = ZoomPickImage(self.owner, size=(self.W, self.H),
-                                 pos=(0, 0), source=self.photo.path)
+        # origin=(0,0)：这一批用例把窗口坐标直接当局部坐标用
+        self.img = _PlacedImage(self.owner, size=(self.W, self.H),
+                                pos=(0, 0), source=self.photo.path)
 
     def tearDown(self):
         if self.img._touch is not None:
@@ -180,36 +214,6 @@ class SampleMappingTest(unittest.TestCase):
         self.assertAlmostEqual(dh, self.W, delta=1.0)
         self.assertAlmostEqual(y0, (self.H - dh) / 2.0, delta=1.0,
                                msg="图片应上下居中，否则取样位置整体偏移")
-
-    def test_touch_pos_is_parent_space(self):
-        """触摸坐标是「父容器坐标系」，不是窗口坐标系。
-
-        实机上照片在 ScrollView 里的卡片里，Kivy 派发给控件的 ``touch.pos``
-        已经被 ScrollView 平移过（实测和窗口坐标差 700px 以上，滚得越多差越大）。
-        旧代码拿窗口坐标的图片矩形去比 ``touch.pos``，于是每次都被判成
-        「点在图外」，v 被夹到图片另一头 —— 用户看到的就是「吸色经常失败、
-        点上面还说不要点边框」。这里用「父容器有偏移 + 控件不在原点」把它钉住。
-        """
-        from kivy.uix.floatlayout import FloatLayout
-
-        parent = FloatLayout(size=(400, 500), pos=(100, 50))
-        img = ZoomPickImage(self.owner, size_hint=(1, 1),
-                            pos_hint={"x": 0, "y": 0},
-                            source=self.photo.path)
-        parent.add_widget(img)
-        parent.do_layout()
-
-        # 控件局部要取右上象限的中心，先算局部点，再还原成 Kivy 会派发的父坐标
-        lx0, ly0, dw, dh = img.local_image_rect()
-        local = (lx0 + dw * 0.75, ly0 + dh * 0.75)
-        got = img.sample_at(*local)
-        self.assertEqual(got[0], COLORS["右上"], "局部坐标取样就不对")
-
-        touch = _Touch(img.x + local[0], img.y + local[1])
-        self.assertTrue(img.on_touch_down(touch))
-        self.assertEqual(self.owner.zooms[-1][0], COLORS["右上"],
-                         "touch.pos 被当成窗口坐标算了，取到的是别的像素")
-        img._end()
 
     def test_each_quadrant_samples_right_color(self):
         for name, rgb in COLORS.items():
@@ -262,9 +266,10 @@ class SampleMappingTest(unittest.TestCase):
         self.assertFalse(self.img.sampling, "松手后还停在取样状态")
 
     def test_drag_updates_preview(self):
-        t = _Touch(*self._quad_point("左上"))
+        x, y = self._quad_point("左上")
+        t = _Touch(x, y)
         self.img.on_touch_down(t)
-        t.x, t.y = self._quad_point("右下")
+        t.move_to(*self._quad_point("右下"))
         self.img._on_move(None, t)
         self.assertEqual(self.owner.zooms[-1][0], COLORS["右下"],
                          "拖动后放大预览没跟上手指")
@@ -293,6 +298,104 @@ class SampleMappingTest(unittest.TestCase):
         self.assertFalse(sv.do_scroll_y, "取色时页面还能滚动")
         self.img._on_up(None, self.img._touch)
         self.assertTrue(sv.do_scroll_y, "松手后要恢复滚动")
+
+
+class CoordinateSpaceTest(unittest.TestCase):
+    """「吸色点永远偏离手指」的回归：触摸走窗口坐标，控件原点取绘制矩阵。
+
+    实机 bug 现场：按住照片出放大图，但取色点永远在手指右下方很远的地方。
+    原因是两套坐标被混在一起比 ——
+      * ``touch.pos`` 在 ScrollView 里会被 ``apply_transform_2d`` 平移；
+      * 更致命的是**按下走控件树、拖动/抬手走 Window 事件**，同一个手指位置
+        读出来能差 700px，于是拖动和抬手那一下必然吸到别处；
+      * ``self.pos`` 又是父容器坐标，和屏幕上画的位置也不是一回事。
+    现在：位置一律用 ``touch.sx/sy`` 还原窗口坐标，原点一律取
+    ``get_window_matrix()``，两边同一套，按下和拖动也就一致了。
+    """
+
+    W, H = 300, 400
+    ORIGIN = (120.0, 900.0)          # 控件画在窗口的这儿，而 self.pos 是 (0,0)
+
+    def setUp(self):
+        self.photo = photomod._load_bytes(make_quad_bytes())
+        self.owner = _FakeOwner(self.photo.pil)
+        self.img = _PlacedImage(self.owner, size=(self.W, self.H), pos=(0, 0),
+                                source=self.photo.path, origin=self.ORIGIN)
+
+    def tearDown(self):
+        if self.img._touch is not None:
+            self.img._end()
+
+    def _window_of(self, name):
+        """某个象限中心在**窗口**里的坐标。"""
+        x0, y0, dw, dh = self.img.local_image_rect()
+        u = 0.75 if "右" in name else 0.25
+        v = 0.75 if "上" in name else 0.25
+        return (self.ORIGIN[0] + x0 + dw * u,
+                self.ORIGIN[1] + y0 + dh * v)
+
+    def test_press_samples_where_finger_is(self):
+        for name, rgb in COLORS.items():
+            wx, wy = self._window_of(name)
+            self.assertTrue(self.img.on_touch_down(_Touch(wx, wy)),
+                            f"按在 {name} 象限上没反应")
+            self.assertEqual(self.owner.zooms[-1][0], rgb,
+                             f"按在 {name}，取到的却是别的颜色")
+            self.img._end()
+
+    def test_transformed_touch_pos_is_ignored(self):
+        """``touch.pos`` 被容器平移过也照样取对 —— 只认 sx/sy。"""
+        wx, wy = self._window_of("左上")
+        self.img.on_touch_down(_Touch(wx, wy, shift=(0, -700)))
+        self.assertEqual(self.owner.zooms[-1][0], COLORS["左上"])
+        self.img._end()
+
+    def test_drag_keeps_same_space_as_down(self):
+        """拖动事件带的坐标和按下不是一套，取样也不能跟着漂。"""
+        wx, wy = self._window_of("左上")
+        t = _Touch(wx, wy)
+        self.img.on_touch_down(t)
+        self.assertEqual(self.owner.zooms[-1][0], COLORS["左上"])
+
+        nx, ny = self._window_of("右下")
+        t.move_to(nx, ny, shift=(28, -706))       # 实机量到的平移量
+        self.img._on_move(None, t)
+        self.assertEqual(self.owner.zooms[-1][0], COLORS["右下"],
+                         "拖动时取样点漂到别处去了")
+
+        self.img._on_up(None, t)
+        self.assertEqual(self.owner.samples[-1][0], COLORS["右下"],
+                         "抬手写回的颜色和手指不在一个位置")
+        self.assertIsNone(self.img._origin, "松手后没清掉缓存的原点")
+
+    def test_old_pos_based_math_would_be_wrong(self):
+        """把 ``窗口 - self.pos`` 当局部坐标会取到别的颜色（钉住回归）。"""
+        wx, wy = self._window_of("左上")
+        wrong = self.img.sample_at(wx - self.img.x, wy - self.img.y)
+        self.assertIsNotNone(wrong)
+        self.assertNotEqual(wrong[0], COLORS["左上"],
+                            "两种算法得出了同一个结果，这个用例就失去意义了")
+
+    def test_press_outside_is_ignored(self):
+        """点在该控件外面要放行，别把页面滚动抢走。"""
+        t = _Touch(self.ORIGIN[0] - 60, self.ORIGIN[1] + 10)
+        self.assertFalse(self.img.on_touch_down(t))
+        self.assertIsNone(self.img._touch)
+
+    def test_origin_matches_drawing_matrix(self):
+        """``window_origin()`` 取的是绘制矩阵，不是 ``self.pos``。"""
+        from kivy.uix.boxlayout import BoxLayout
+
+        img = ZoomPickImage(self.owner, size=(100, 120), pos=(0, 0),
+                            source=self.photo.path)
+        outer = BoxLayout(size=(400, 400))
+        mid = BoxLayout(size=(200, 200), pos=(40, 60))
+        outer.add_widget(mid)
+        mid.add_widget(img)
+
+        x, y, _ = img.get_window_matrix().transform_point(0, 0, 0)
+        self.assertAlmostEqual(img.window_origin()[0], x, delta=0.01)
+        self.assertAlmostEqual(img.window_origin()[1], y, delta=0.01)
 
 
 class ZoomPreviewTest(unittest.TestCase):
