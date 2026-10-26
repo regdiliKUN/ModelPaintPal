@@ -20,6 +20,7 @@ DocumentsUI）返回的是 ``content://media/picker/.../1234`` 这类 URI，``ge
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -110,13 +111,20 @@ def _pick_android(finish) -> None:
             pass
         if result_code != -1 or intent is None:      # -1 == RESULT_OK
             return finish(None, "")                  # 用户取消，静默返回
-        try:
-            uri = intent.getData()
-            if uri is None:
-                return finish(None, "没有拿到照片地址")
-            finish(_load_bytes(_read_uri(uri)), "")
-        except Exception as exc:
-            finish(None, f"照片载入失败（{type(exc).__name__}）")
+        uri = intent.getData()
+        if uri is None:
+            return finish(None, "没有拿到照片地址")
+
+        # 读字节 + 解码缩放可能要好几百毫秒（上亿像素的照片更久），
+        # 放在主线程会卡住界面甚至触发系统 ANR，所以丢到后台线程。
+        # finish → _deliver 本身会切回主线程。
+        def work():
+            try:
+                finish(_load_bytes(_read_uri(uri)), "")
+            except Exception as exc:
+                finish(None, f"照片载入失败（{type(exc).__name__}）")
+
+        threading.Thread(target=work, daemon=True).start()
 
     activity.bind(on_activity_result=on_result)
 
