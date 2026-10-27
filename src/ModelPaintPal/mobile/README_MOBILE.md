@@ -5,7 +5,7 @@
 只重写了展示层（Kivy）。
 
 ## 功能（与桌面端一一对应）
-- **取色**：从手机图库选择照片，**按住照片即取色、拖动实时预览、松手确认**（照片下方有放大图 + 准星 + 色块，能看清正在取哪个像素）；也支持手动输入 HEX / RGB 滑块。
+- **取色**：从手机图库选择照片后**进入全屏取色层**——整块屏幕就是取色板，按住即取色、拖动实时跟随、松手确认；屏幕顶部有 6× 放大图 + 准星 + 色块 + HEX，能看清正在取哪个像素（放在顶部是为了不被自己的手指挡住）。也支持手动输入 HEX / RGB 滑块。
 - **配色建议**：按 CIEDE2000 等色差公式给出最接近的漆（11 品牌库），含配方、覆盖率、替代色。
 - **色卡对比**：目标色与候选漆并列，点按复制色值。
 - **基础漆调配**：把任意目标色分解为红 / 黄 / 蓝 / 白 / 黑五瓶基础漆的配比（同一条混色比例条 + 滴数），并可指定基础漆品牌。
@@ -65,31 +65,24 @@ mobile/
     「ContentResolver 读字节 → `Image.open` → EXIF 摆正 → 缩到 2560 → 存 PNG」
     在低端机上是 1~3 秒，卡在主线程既有明显冻结，也可能触发系统 ANR。
     `photo.py` 用后台线程做这一段，结果再经 `Clock.schedule_once` 切回主线程回调。
-13. **取手指位置只认 `touch.sx/sy`；控件原点只认 `get_window_matrix()`**。
-    这条踩过两次，第一次只修对一半，实机上仍报「取到的颜色在手指右下方
-    很远的地方」：
-    - `touch.pos` **不是**窗口坐标。`ScrollView.on_scroll_start` /
-      `simulate_touch_down` 都会 `touch.apply_transform_2d(self.to_local)`
-      平移一次；更麻烦的是**按下走控件树、拖动和抬手走 `Window` 事件**，
-      两边的坐标系还不一样 —— 同一手指位置实测按下读 1180、拖动读 1886，
-      差 706px。所以「按下用 touch.pos、拖动也用 touch.pos」的写法，
-      拖动和抬手必然吸到别处。
-    - `self.pos` 是**父容器坐标**，和屏幕上画的位置隔着整条布局链：实测
-      `self.pos=(28,731)`，照片实际画在 `(56,1277)`，差 546px；页面一滚动
-      差得更多，所以偏移量会**随滚动变大**，方向固定偏向一边。
-    - `to_window()` 在这里也不能用：ScrollView 只重写了 `to_local/to_parent`
-      去补 `g_translate`，不含各级父容器偏移，实测返回值就等于 `g_translate`。
-    正确写法（`ZoomPickImage.window_point` / `window_origin`）：
-      * 手指窗口坐标 = `touch.sx * Window.width, touch.sy * Window.height`。
-        `apply_transform_2d` 只改 x/y/px/py/ox/oy，**从不改 sx/sy**，而
-        `scale_for_screen()` 本来就是拿 sx/sy 反算 x/y 的 —— sx/sy 才是真位置。
-      * 控件窗口原点 = `get_window_matrix().transform_point(0, 0, 0)`，与截图
-        像素实测只差 1px（截图 436 / 矩阵 435）。滚动后它跟着变（实测
-        scroll_y 1.0→0.55 时原点 1277→1089），**每按一次重新取**。
-      * 按下时缓存原点（此时已冻结滚动），`on_touch_move/up` 复用它，
-        保证整段手势自始至终在同一套坐标里。
-      * 命中判定也别用 `collide_point(*touch.pos)`（它比的是 `self.pos`），
-        换算成局部坐标后再判 `0 <= x <= width`。
+13. **取色区必须放在「铺满窗口的独立层」里，只用 `touch.pos - self.pos`。**
+    这一条踩了三次，前两次都是在「算准」触摸与绘制之间的换算关系，实机上
+    全都整体偏下几百像素：
+    - `touch.pos` 在 ScrollView 里会被 `g_translate` 平移一次，更要命的是
+      **按下走控件树、拖动和抬手走 `Window` 事件**，两条路的坐标系不同 ——
+      同一手指位置实测按下读 1180、拖动读 1886，差 706px。
+    - `self.pos` 是父容器坐标，和屏幕上画的位置隔着整条布局链（实测
+      `self.pos=(28,731)`，照片却画在 `(56,1277)`）；页面一滚动差得更多。
+    - 用 `touch.sx/sy` 还原窗口坐标 + `get_window_matrix()` 还原控件原点，
+      这套在桌面逐像素验证全对（静止、滚动、拖动都验过），**真机仍然偏**。
+      既然推导链上还有环境相关的量收不干净，就别推导了。
+    现在的做法：取色区是 `PickOverlay(ModalView)` —— 铺满窗口、`pos=(0,0)`、
+    `size=Window.size`，照片区再放进它内部的 BoxLayout。于是
+    **父容器坐标 == 窗口坐标**，`touch.pos - self.pos` 就是 canvas 用的局部
+    坐标，按下 / 拖动 / 抬手三条路给出同一套值，不依赖任何矩阵推算。
+    验证脚本 `_shots/verify_overlay.py`：真实触摸派发 + 截图四角标记，
+    四个象限全部 `取样色 == 截图像素 == 期望色`。
+
 14. **`Line` 在这个环境里画不出来**。`Line(circle=...)`、`Line(points=...)`
     放在图片上/旁边一律不渲染，而且 `Line.circle` 只可写不可读（读回 `None`，
     没法用它做状态判断）。要图形就用 `ColorRect`，或干脆用 PIL 画进图片
@@ -118,6 +111,14 @@ mobile/
       ≫ 截图。确需截图时把窗口切到前台，并在同一个 tick 内先截图再读像素。
 21. **Kivy 会吞掉 stdout**。无头环境写测试报告要自己 `open(..., 'w')` 落盘，
     不能指望 `print` 出现在终端里。
+
+22. **这个 Kivy 构建里 `touch.grab_current` 永远是 `None`**。`grab()` 只往
+    `grab_list` 里追加，从不更新 `grab_current`（实测：`grab_list` 长度为 1
+    而 `grab_current` 是 None）。所以官方文档那套
+    `if touch.grab_current is self:` 在这里会让**拖动和抬手全部失效** ——
+    表现就是「按下去有反应、一动就不动了」/「松手没取到色」。
+    判断「是不是我按下的那根手指」要用**对象身份**：
+    `if self._touch is None or touch is not self._touch: return False`。
 
 ## 本地桌面调试
 ```bash
@@ -149,9 +150,8 @@ python -m unittest discover -s mobile/tests -p "test_*.py" -v
   导航满足 48dp 触摸目标）。
 - `test_mobile_photo.py`：选图与吸色回归（字节→照片→界面整链路、EXIF 摆正、
   缓存清理、`contain` 居中留白的坐标映射、按下即取样 / 拖动跟手 / 抬手只提交一次、
-  取色期间不能滚动页面、放大图中心必须就是取到的那个像素、留白处夹取不报错、
-  **坐标系**：控件画在窗口 (120,900) 而 `self.pos=(0,0)` 时仍要取对颜色、
-  `touch.pos` 被平移 700px 也不影响、拖动与按下必须是同一套坐标）。
+  放大图中心必须就是取到的那个像素、留白处夹取不报错、**全屏取色层铺满窗口**、
+  **坐标系**：取色区放在 `pos=(0,120)` 时仍要取对颜色、拖动与按下必须是同一套坐标）。
 - 无头环境跑 UI 测试需指定窗口后端：`KIVY_WINDOW=sdl2 python -m unittest ...`，
   否则 Kivy 在 import 阶段会静默崩溃。
 - 注意用 `discover` 形式运行：`python -m unittest discover -s src/ModelPaintPal/mobile/tests -t src`。

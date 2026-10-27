@@ -22,7 +22,7 @@ source.exclude_dirs = tests,build,dist,docs,scripts,.git,app/ui,app/resources
 source.main = main.py
 
 # (str) 版本
-version = 1.3.0
+version = 1.4.0
 
 # (list) 依赖（python3 由 p4a 自动加）
 requirements = python3,kivy,pillow,plyer,jnius

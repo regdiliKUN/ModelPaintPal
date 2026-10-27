@@ -28,7 +28,8 @@ _ = mobile.bootstrap.ROOT  # 确保路径重定向副作用已执行
 from PIL import Image as PILImage  # noqa: E402
 
 from mobile import photo as photomod  # noqa: E402
-from mobile.screens.pick_screen import ZoomPickImage, ZoomPreview  # noqa: E402
+from mobile.screens.pick_screen import (  # noqa: E402
+    PickOverlay, PhotoStage, ZoomPreview)
 
 QUAD = 200
 # 四象限测试图：左上红、右上绿、左下蓝、右下黄
@@ -112,290 +113,181 @@ class PhotoDecodeTest(unittest.TestCase):
             tmp.unlink()
 
 
-class _FakeOwner:
-    """替代 PickScreen，只记录回调。"""
-
-    def __init__(self, pil):
-        self.pil_image = pil
-        self.samples = []        # [(rgb, u, v)]
-        self.zooms = []          # [(rgb, u, v, dw, dh, force)]
-        self.resets = 0
-
-    def on_sampled(self, px, rel_x, rel_y):
-        self.samples.append((px, rel_x, rel_y))
-
-    def zoom_update(self, rgb, u, v, dw, dh, force=False):
-        self.zooms.append((rgb, u, v, dw, dh, force))
-
-    def zoom_reset(self):
-        self.resets += 1
-
-
 class _Touch:
-    """够用的触摸替身：uid / x / y / sx / sy / pos。
+    """够用的触摸替身。
 
-    ``sx`` / ``sy`` 是手指真实所在的归一化窗口坐标；``x`` / ``y`` 是 Kivy
-    派发时可能被容器改写过的值 —— ``shift`` 就是用来模拟那种平移的
-    （实机实测按下与拖动能差 700px）。取样只认 sx/sy。
+    注意：这里不再模拟「窗口坐标 vs 父容器坐标」的差异 —— 新的取色层把
+    取色区做成铺满窗口的独立层，两者本来就是同一套坐标，``x`` / ``y``
+    就是要用的那份值。``grab`` 相关的方法是给按下→拖动→抬手链路用的。
     """
 
-    def __init__(self, x, y, uid=1, shift=(0.0, 0.0)):
-        from kivy.core.window import Window
-
+    def __init__(self, x, y, uid=1):
         self.uid = uid
-        self.sx = x / float(Window.width or 1.0)
-        self.sy = y / float(Window.height or 1.0)
-        self.x = x + shift[0]
-        self.y = y + shift[1]
-
-    def move_to(self, x, y, shift=(0.0, 0.0)):
-        from kivy.core.window import Window
-
-        self.sx = x / float(Window.width or 1.0)
-        self.sy = y / float(Window.height or 1.0)
-        self.x = x + shift[0]
-        self.y = y + shift[1]
+        self.x = x
+        self.y = y
+        self.grab_current = None
 
     @property
     def pos(self):
         return (self.x, self.y)
 
+    def grab(self, widget):
+        self.grab_current = widget
 
-class _PlacedImage(ZoomPickImage):
-    """把「控件画在窗口的哪儿」和 ``self.pos`` 拆开，用来钉住坐标系。
-
-    实机上这两者本来就不同：``self.pos`` 是父容器坐标 (28,731)，屏幕上却在
-    (56,1277)。把 origin 显式钉成 (120,900)，一旦有人把取样改回
-    ``touch.pos - self.pos``，这些用例会立刻红。
-    """
-
-    def __init__(self, *args, origin=(0.0, 0.0), **kwargs):
-        self._fake_origin = origin
-        super().__init__(*args, **kwargs)
-
-    def window_origin(self):
-        return self._fake_origin
+    def ungrab(self, widget):
+        if self.grab_current is widget:
+            self.grab_current = None
 
 
 class SampleMappingTest(unittest.TestCase):
-    """坐标映射与手势：居中留白、贴边夹取、按下即取、松手才写回。"""
+    """取样几何与手势：居中留白、贴边夹取、按下即取、松手才写回。"""
 
     W, H = 300, 400          # 控件比图片「瘦高」，上下会留白
 
     def setUp(self):
         self.photo = photomod._load_bytes(make_quad_bytes())
-        self.owner = _FakeOwner(self.photo.pil)
-        # origin=(0,0)：这一批用例把窗口坐标直接当局部坐标用
-        self.img = _PlacedImage(self.owner, size=(self.W, self.H),
-                                pos=(0, 0), source=self.photo.path)
+        self.samples = []        # 每次预览刷新 (rgb, u, v, dw, dh, force)
+        self.commits = []        # 松手确认的颜色
+        self.stage = PhotoStage(on_sample=self._sink,
+                                on_commit=self.commits.append,
+                                size=(self.W, self.H), pos=(0, 0),
+                                source=self.photo.path)
+        self.stage.pil = self.photo.pil
 
-    def tearDown(self):
-        if self.img._touch is not None:
-            self.img._end()
+    def _sink(self, rgb, u, v, dw, dh, force):
+        self.samples.append((rgb, u, v, dw, dh, force))
 
     def _local_point(self, ix, iy):
-        """图片像素坐标 → 控件局部坐标（取像素中心）。"""
-        x0, y0, dw, dh = self.img.local_image_rect()
+        """图片像素坐标（PIL，自上而下）→ 控件局部坐标（左下角原点）。"""
+        x0, y0, dw, dh = self.stage.local_image_rect()
         w, h = self.photo.pil.size
-        rel_x = (ix + 0.5) / w
-        rel_y = 1.0 - (iy + 0.5) / h
-        return x0 + rel_x * dw, y0 + rel_y * dh
+        return (x0 + (ix + 0.5) / float(w) * dw,
+                y0 + (1.0 - (iy + 0.5) / float(h)) * dh)
 
     def _quad_point(self, name):
-        ix = QUAD // 2 + (QUAD if "右" in name else 0)
-        iy = QUAD // 2 + (QUAD if "下" in name else 0)
-        return self._local_point(ix, iy)
+        w, h = self.photo.pil.size
+        ix = w * 0.25 if "左" in name else w * 0.75
+        iy = h * 0.25 if "上" in name else h * 0.75
+        return self._local_point(int(ix), int(iy))
 
+    # -------------------------------------------------------------- 几何
     def test_local_rect_is_centered(self):
-        rect = self.img.local_image_rect()
-        self.assertIsNotNone(rect, "拿不到绘制矩形就无法吸色")
-        _, y0, dw, dh = rect
-        self.assertAlmostEqual(dw, self.W, delta=1.0)
-        self.assertAlmostEqual(dh, self.W, delta=1.0)
-        self.assertAlmostEqual(y0, (self.H - dh) / 2.0, delta=1.0,
-                               msg="图片应上下居中，否则取样位置整体偏移")
+        x0, y0, dw, dh = self.stage.local_image_rect()
+        self.assertAlmostEqual(dw, self.W, delta=1)        # 宽度受限
+        self.assertLess(dh, self.H)
+        self.assertAlmostEqual(x0, 0, delta=1, msg="水平没居中")
+        self.assertAlmostEqual(y0, (self.H - dh) / 2.0, delta=1, msg="垂直没居中")
 
     def test_each_quadrant_samples_right_color(self):
         for name, rgb in COLORS.items():
-            got = self.img.sample_at(*self._quad_point(name))
-            self.assertIsNotNone(got, f"点 {name} 象限没有取到色")
+            got = self.stage.sample_at(*self._quad_point(name))
+            self.assertIsNotNone(got)
             self.assertEqual(got[0], rgb, f"{name} 象限取到的颜色不对")
 
     def test_letterbox_is_clamped(self):
-        """点到照片上方的留白，要夹到顶边继续取色，而不是弹「不能点边框」。
+        """点在留白（图片外）要被夹到最近的边缘像素，而不是拒绝。"""
+        x0, y0, dw, dh = self.stage.local_image_rect()
+        # 取左半边，避开正中那条象限分界线
+        got = self.stage.sample_at(x0 + dw * 0.25, self.H - 1)
+        self.assertIsNotNone(got, "留白处直接拒绝了，用户会以为点坏了")
+        self.assertAlmostEqual(got[2], 1.0, places=3)
+        self.assertEqual(got[0], COLORS["左上"], "夹取后应取到图片最上面一行")
 
-        用户反馈的就是这条：照片本身是深色截图，和深色底框分不清，
-        手指偏出一两毫米就会命中「请按住照片本身，四周灰色留白处不能取色」。
-        """
-        x0, y0, dw, dh = self.img.local_image_rect()
-        for dx in (-30, 0, 30):
-            # 取左半边，避开正中那条象限分界线
-            got = self.img.sample_at(x0 + dw * 0.25 + dx, y0 + dh + 60)
-            self.assertIsNotNone(got)
-            rgb, _u, v = got
-            self.assertEqual(v, 1.0, "没有夹到图片顶边")
-            self.assertEqual(rgb, COLORS["左上"], "顶边左半边应是左上象限的颜色")
-
+    # -------------------------------------------------------------- 手势
     def test_touch_down_samples_immediately(self):
-        """按下就出放大预览，不用等 0.3 秒 —— 这是「点了没反应」的根因。"""
         t = _Touch(*self._quad_point("右上"))
-        self.assertTrue(self.img.on_touch_down(t),
-                        "取色时应该吃掉这一下，否则页面会跟着滚")
-        self.assertEqual(self.img._touch, t)
-        self.assertEqual(len(self.owner.zooms), 1, "按下没有立刻刷新放大预览")
-        self.assertEqual(self.owner.zooms[0][0], COLORS["右上"])
-        self.assertEqual(self.owner.samples, [], "还没松手就写回颜色了")
+        self.assertTrue(self.stage.on_touch_down(t))
+        self.assertTrue(self.samples, "按下没有立刻取样")
+        self.assertEqual(self.samples[-1][0], COLORS["右上"])
 
     def test_touch_down_marks_sample_point(self):
         """按下要记下「正在取哪个像素」——下方放大图靠它画准星。"""
-        x, y = self._quad_point("右下")
-        self.img.on_touch_down(_Touch(x, y))
-        self.assertTrue(self.img.sampling, "按下后没有任何取样状态")
-        cx, cy = self.img.sample_center
-        self.assertAlmostEqual(cx, x, delta=2.0)
-        self.assertAlmostEqual(cy, y, delta=2.0)
-
-        x0, y0, dw, dh = self.img.local_image_rect()
-        self.assertGreaterEqual(cx, x0 - 1)
-        self.assertLessEqual(cx, x0 + dw + 1, "取样点跑到图片外面去了")
+        x, y = self._quad_point("左下")
+        self.stage.on_touch_down(_Touch(x, y))
+        self.assertTrue(self.stage.sampling)
+        cx, cy = self.stage.sample_center
+        self.assertAlmostEqual(cx, x, delta=1.5)
+        self.assertAlmostEqual(cy, y, delta=1.5)
 
     def test_mark_cleared_after_release(self):
         t = _Touch(*self._quad_point("左上"))
-        self.img.on_touch_down(t)
-        self.img._on_up(None, t)
-        self.assertFalse(self.img.sampling, "松手后还停在取样状态")
+        self.stage.on_touch_down(t)
+        self.stage.on_touch_up(t)
+        self.assertFalse(self.stage.sampling, "抬手后还在显示「正在取色」")
 
     def test_drag_updates_preview(self):
-        x, y = self._quad_point("左上")
-        t = _Touch(x, y)
-        self.img.on_touch_down(t)
-        t.move_to(*self._quad_point("右下"))
-        self.img._on_move(None, t)
-        self.assertEqual(self.owner.zooms[-1][0], COLORS["右下"],
+        t = _Touch(*self._quad_point("左上"))
+        self.stage.on_touch_down(t)
+        t.x, t.y = self._quad_point("右下")
+        self.stage.on_touch_move(t)
+        self.assertEqual(self.samples[-1][0], COLORS["右下"],
                          "拖动后放大预览没跟上手指")
 
     def test_release_commits_once(self):
         t = _Touch(*self._quad_point("左下"))
-        self.img.on_touch_down(t)
-        self.img._on_up(None, t)
-        self.assertEqual(len(self.owner.samples), 1, "松手应该确认一次颜色")
-        self.assertEqual(self.owner.samples[0][0], COLORS["左下"])
-        self.assertIsNone(self.img._touch, "松手后没清掉触摸状态")
-        self.assertTrue(self.owner.zooms[-1][5],
-                        "最后一帧没强制刷新，会被节流吞掉")
+        self.stage.on_touch_down(t)
+        self.stage.on_touch_up(t)
+        self.assertEqual(self.commits, [COLORS["左下"]], "松手没写回颜色，或写回了多次")
 
-    def test_scroll_is_frozen_while_picking(self):
-        """取色期间必须锁住 ScrollView，否则手指下面的内容会跟着跑。"""
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.scrollview import ScrollView
-
-        sv = ScrollView(do_scroll_x=False, do_scroll_y=True, size=(self.W, self.H))
-        inner = BoxLayout(size_hint_y=None, height=self.H)
-        sv.add_widget(inner)
-        inner.add_widget(self.img)
-
-        self.img.on_touch_down(_Touch(*self._quad_point("左上")))
-        self.assertFalse(sv.do_scroll_y, "取色时页面还能滚动")
-        self.img._on_up(None, self.img._touch)
-        self.assertTrue(sv.do_scroll_y, "松手后要恢复滚动")
+    def test_press_outside_is_ignored(self):
+        t = _Touch(-40, 10)
+        self.assertFalse(self.stage.on_touch_down(t))
+        self.assertEqual(self.commits, [])
 
 
-class CoordinateSpaceTest(unittest.TestCase):
-    """「吸色点永远偏离手指」的回归：触摸走窗口坐标，控件原点取绘制矩阵。
+class IdentitySpaceTest(unittest.TestCase):
+    """取色层的坐标约定：``touch.pos - self.pos`` 必须就是取样坐标。
 
-    实机 bug 现场：按住照片出放大图，但取色点永远在手指右下方很远的地方。
-    原因是两套坐标被混在一起比 ——
-      * ``touch.pos`` 在 ScrollView 里会被 ``apply_transform_2d`` 平移；
-      * 更致命的是**按下走控件树、拖动/抬手走 Window 事件**，同一个手指位置
-        读出来能差 700px，于是拖动和抬手那一下必然吸到别处；
-      * ``self.pos`` 又是父容器坐标，和屏幕上画的位置也不是一回事。
-    现在：位置一律用 ``touch.sx/sy`` 还原窗口坐标，原点一律取
-    ``get_window_matrix()``，两边同一套，按下和拖动也就一致了。
+    上一版用 ``get_window_matrix()`` 推导「控件画在哪」、再用 ``touch.sx/sy``
+    反推手指位置，两条推导在手机上都可能不准（实测仍整体偏下）。这一版改成
+    「父容器坐标 = 窗口坐标 = 局部坐标 + self.pos」这一条唯一的关系，
+    所以这里把它钉死：控件放在任何位置，取样都必须对得上。
     """
-
-    W, H = 300, 400
-    ORIGIN = (120.0, 900.0)          # 控件画在窗口的这儿，而 self.pos 是 (0,0)
 
     def setUp(self):
         self.photo = photomod._load_bytes(make_quad_bytes())
-        self.owner = _FakeOwner(self.photo.pil)
-        self.img = _PlacedImage(self.owner, size=(self.W, self.H), pos=(0, 0),
-                                source=self.photo.path, origin=self.ORIGIN)
+        self.samples = []
+        # 故意把控件放在一个不为零的位置：父容器是取色层，它铺满窗口
+        self.stage = PhotoStage(on_sample=lambda *a: self.samples.append(a),
+                                size=(600, 500), pos=(0, 120),
+                                source=self.photo.path)
+        self.stage.pil = self.photo.pil
 
-    def tearDown(self):
-        if self.img._touch is not None:
-            self.img._end()
+    def _at(self, name):
+        x0, y0, dw, dh = self.stage.local_image_rect()
+        w, h = self.photo.pil.size
+        ix = w * 0.25 if "左" in name else w * 0.75
+        iy = h * 0.25 if "上" in name else h * 0.75
+        lx = x0 + (ix + 0.5) / float(w) * dw
+        ly = y0 + (1.0 - (iy + 0.5) / float(h)) * dh
+        return lx, ly
 
-    def _window_of(self, name):
-        """某个象限中心在**窗口**里的坐标。"""
-        x0, y0, dw, dh = self.img.local_image_rect()
-        u = 0.75 if "右" in name else 0.25
-        v = 0.75 if "上" in name else 0.25
-        return (self.ORIGIN[0] + x0 + dw * u,
-                self.ORIGIN[1] + y0 + dh * v)
+    def test_local_point_subtracts_pos(self):
+        lx, ly = self._at("右上")
+        touch = _Touch(lx + self.stage.x, ly + self.stage.y)
+        got = self.stage.to_local_point(touch)
+        self.assertAlmostEqual(got[0], lx, places=3)
+        self.assertAlmostEqual(got[1], ly, places=3)
 
-    def test_press_samples_where_finger_is(self):
+    def test_press_uses_pos_relative_coordinates(self):
+        """控件不在原点时，按下去取的必须是手指底下那个色。"""
         for name, rgb in COLORS.items():
-            wx, wy = self._window_of(name)
-            self.assertTrue(self.img.on_touch_down(_Touch(wx, wy)),
-                            f"按在 {name} 象限上没反应")
-            self.assertEqual(self.owner.zooms[-1][0], rgb,
-                             f"按在 {name}，取到的却是别的颜色")
-            self.img._end()
+            lx, ly = self._at(name)
+            touch = _Touch(lx + self.stage.x, ly + self.stage.y)
+            self.assertTrue(self.stage.on_touch_down(touch), f"{name} 按下被拒")
+            self.assertEqual(self.samples[-1][0], rgb, f"{name} 取色错位")
+            self.stage.on_touch_up(touch)
 
-    def test_transformed_touch_pos_is_ignored(self):
-        """``touch.pos`` 被容器平移过也照样取对 —— 只认 sx/sy。"""
-        wx, wy = self._window_of("左上")
-        self.img.on_touch_down(_Touch(wx, wy, shift=(0, -700)))
-        self.assertEqual(self.owner.zooms[-1][0], COLORS["左上"])
-        self.img._end()
-
-    def test_drag_keeps_same_space_as_down(self):
-        """拖动事件带的坐标和按下不是一套，取样也不能跟着漂。"""
-        wx, wy = self._window_of("左上")
-        t = _Touch(wx, wy)
-        self.img.on_touch_down(t)
-        self.assertEqual(self.owner.zooms[-1][0], COLORS["左上"])
-
-        nx, ny = self._window_of("右下")
-        t.move_to(nx, ny, shift=(28, -706))       # 实机量到的平移量
-        self.img._on_move(None, t)
-        self.assertEqual(self.owner.zooms[-1][0], COLORS["右下"],
-                         "拖动时取样点漂到别处去了")
-
-        self.img._on_up(None, t)
-        self.assertEqual(self.owner.samples[-1][0], COLORS["右下"],
-                         "抬手写回的颜色和手指不在一个位置")
-        self.assertIsNone(self.img._origin, "松手后没清掉缓存的原点")
-
-    def test_old_pos_based_math_would_be_wrong(self):
-        """把 ``窗口 - self.pos`` 当局部坐标会取到别的颜色（钉住回归）。"""
-        wx, wy = self._window_of("左上")
-        wrong = self.img.sample_at(wx - self.img.x, wy - self.img.y)
-        self.assertIsNotNone(wrong)
-        self.assertNotEqual(wrong[0], COLORS["左上"],
-                            "两种算法得出了同一个结果，这个用例就失去意义了")
-
-    def test_press_outside_is_ignored(self):
-        """点在该控件外面要放行，别把页面滚动抢走。"""
-        t = _Touch(self.ORIGIN[0] - 60, self.ORIGIN[1] + 10)
-        self.assertFalse(self.img.on_touch_down(t))
-        self.assertIsNone(self.img._touch)
-
-    def test_origin_matches_drawing_matrix(self):
-        """``window_origin()`` 取的是绘制矩阵，不是 ``self.pos``。"""
-        from kivy.uix.boxlayout import BoxLayout
-
-        img = ZoomPickImage(self.owner, size=(100, 120), pos=(0, 0),
-                            source=self.photo.path)
-        outer = BoxLayout(size=(400, 400))
-        mid = BoxLayout(size=(200, 200), pos=(40, 60))
-        outer.add_widget(mid)
-        mid.add_widget(img)
-
-        x, y, _ = img.get_window_matrix().transform_point(0, 0, 0)
-        self.assertAlmostEqual(img.window_origin()[0], x, delta=0.01)
-        self.assertAlmostEqual(img.window_origin()[1], y, delta=0.01)
+    def test_drag_and_release_use_same_space_as_press(self):
+        lx, ly = self._at("左上")
+        t = _Touch(lx + self.stage.x, ly + self.stage.y)
+        self.stage.on_touch_down(t)
+        lx2, ly2 = self._at("右下")
+        t.x, t.y = lx2 + self.stage.x, ly2 + self.stage.y
+        self.stage.on_touch_move(t)
+        self.assertEqual(self.samples[-1][0], COLORS["右下"], "拖动时坐标跑偏")
+        self.stage.on_touch_up(t)
+        self.assertEqual(self.samples[-1][0], COLORS["右下"], "抬手时坐标跑偏")
 
 
 class ZoomPreviewTest(unittest.TestCase):
@@ -460,6 +352,58 @@ class ZoomPreviewTest(unittest.TestCase):
                       "换照片后旧放大图还留在预览里")
 
 
+class _FakeScreen:
+    """PickOverlay 只依赖这三样东西。"""
+
+    def __init__(self, photo):
+        self.pil_image = photo.pil
+        self.photo_path = photo.path
+        self.applied = []
+
+    def apply_sample(self, rgb):
+        self.applied.append(rgb)
+
+
+class OverlayTest(unittest.TestCase):
+    """全屏取色层：铺满窗口、接管照片、松手把颜色写回主界面。"""
+
+    def setUp(self):
+        self.photo = photomod._load_bytes(make_quad_bytes())
+        self.screen = _FakeScreen(self.photo)
+        self.overlay = PickOverlay(self.screen)
+        self.overlay._fit_window()
+
+    def test_fills_window(self):
+        from kivy.core.window import Window
+
+        self.assertAlmostEqual(self.overlay.x, 0, delta=1)
+        self.assertAlmostEqual(self.overlay.y, 0, delta=1)
+        self.assertAlmostEqual(self.overlay.width, Window.width, delta=1)
+        self.assertAlmostEqual(self.overlay.height, Window.height, delta=1)
+
+    def test_stage_owns_photo(self):
+        self.assertIs(self.overlay.stage.pil, self.photo.pil)
+        self.assertEqual(self.overlay.stage.source, self.photo.path)
+
+    def test_sampling_updates_preview(self):
+        t = _Touch(10, 10)
+        self.overlay.stage.on_touch_down(t)
+        self.assertGreater(self.overlay.preview.last_span, 0,
+                           "按住之后放大图没出来")
+        self.overlay.stage.on_touch_up(t)
+
+    def test_release_writes_color_back(self):
+        from kivy.core.window import Window
+
+        stage = self.overlay.stage
+        x0, y0, dw, dh = stage.local_image_rect()
+        t = _Touch(x0 + dw * 0.25, y0 + dh * 0.75)      # 左上象限
+        stage.on_touch_down(t)
+        stage.on_touch_up(t)
+        self.assertEqual(self.screen.applied, [COLORS["左上"]])
+        self.assertTrue(0 <= t.x <= Window.width)
+
+
 class ScreenWiringTest(unittest.TestCase):
     """界面接线：照片载入后控件的可见状态必须真的变了。"""
 
@@ -477,30 +421,43 @@ class ScreenWiringTest(unittest.TestCase):
         self.app.build()
         self.scr = self.app.screens["pick"]
 
+    def tearDown(self):
+        overlay = getattr(self.scr, "_overlay", None)
+        if overlay is not None and getattr(overlay, "_is_open", False):
+            overlay.dismiss(force=True)
+
     def test_photo_becomes_visible(self):
         photo = photomod._load_bytes(make_quad_bytes())
         self.scr._on_photo_picked(photo, "")
 
-        self.assertEqual(self.scr._img.source, photo.path,
-                         "图片控件还是占位图 —— 用户会以为没选上")
+        self.assertEqual(self.scr._thumb.source, photo.path,
+                         "缩略图还是占位图 —— 用户会以为没选上")
         self.assertEqual(self.scr._img_hint.text, "",
                          "「尚未选择照片」的提示没消失")
-        self.assertEqual(self.scr._img.source, photo.path)
-        self.assertIsNotNone(self.scr._img.texture, "图片没载入纹理，屏幕上会是空的")
+        self.assertIsNotNone(self.scr._thumb.texture,
+                             "缩略图没载入纹理，屏幕上会是空的")
         self.assertIs(self.scr.pil_image, photo.pil)
-        self.assertTrue(self.toasts)
 
-    def test_preview_follows_sample(self):
-        """整页接线：取样回调必须真的把放大图刷出来（用户要看到「正在吸色」）。"""
+    def test_opens_fullscreen_picker(self):
+        """选完照片直接进全屏取色 —— 缩在小卡片里点不准。"""
         photo = photomod._load_bytes(make_quad_bytes())
         self.scr._on_photo_picked(photo, "")
-        self.assertEqual(self.scr._preview.last_span, 0, "换图前不该有旧放大图")
+        overlay = getattr(self.scr, "_overlay", None)
+        self.assertIsNotNone(overlay, "选完照片没有打开全屏取色层")
+        self.assertIsInstance(overlay, PickOverlay)
+        self.assertTrue(overlay._is_open)
+        self.assertIs(overlay.stage.pil, photo.pil)
+        self.assertEqual(overlay.stage.source, photo.path)
 
-        self.scr.zoom_update(COLORS["左上"], 0.25, 0.75,
-                             photo.width, photo.height, True)
-        self.assertGreater(self.scr._preview.last_span, 0)
-        got = PILImage.open(self.scr._preview._path()).convert("RGB")
-        self.assertEqual(got.getpixel((10, 10)), COLORS["左上"])
+    def test_apply_sample_sets_current_color(self):
+        self.scr.apply_sample((18, 52, 86))
+        self.assertEqual(tuple(self.app.current_rgb), (18, 52, 86))
+
+    def test_picker_needs_photo(self):
+        self.scr.pil_image = None
+        self.scr.open_picker()
+        self.assertTrue(any("照片" in t for t in self.toasts),
+                        "没有照片时点取色应该提示，而不是打开一个空白层")
 
     def test_holder_height_follows_aspect(self):
         """取色区高度按照片比例走，但要夹在上下限之间。
@@ -520,13 +477,10 @@ class ScreenWiringTest(unittest.TestCase):
         self.scr._fit_holder(1000, 1500)          # 1:1.5 竖图，理想高度 1500
         self.assertAlmostEqual(holder.height, self.D(self.scr.HOLDER_MAX), delta=1)
 
-        self.assertGreaterEqual(self.D(self.scr.HOLDER_MIN), self.D(160),
-                                "取色区下限太矮，手指按住会盖住整张图")
-
     def test_pick_error_is_reported(self):
-        before = self.scr._img.source
+        before = self.scr._thumb.source
         self.scr._on_photo_picked(None, "照片载入失败（FileNotFoundError）")
-        self.assertEqual(self.scr._img.source, before)
+        self.assertEqual(self.scr._thumb.source, before)
         self.assertTrue(any("失败" in t for t in self.toasts),
                         "载入失败必须告诉用户，不能静默")
 
@@ -536,6 +490,7 @@ class ScreenWiringTest(unittest.TestCase):
 
 
 class PickAndDeliverTest(unittest.TestCase):
+
     """选图入口的两个约定：回调必须回主线程、连点不能弹两次图库。"""
 
     def test_callback_is_marshalled_to_main_thread(self):

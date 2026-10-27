@@ -10,6 +10,7 @@ from kivy.graphics import Color, RoundedRectangle
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.image import Image
+from kivy.uix.modalview import ModalView
 from kivy.uix.screenmanager import Screen
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.slider import Slider
@@ -184,49 +185,40 @@ class ZoomPreview(BoxLayout):
         self.last_span = 0
 
 
-class ZoomPickImage(FloatLayout):
-    """按住即在触点取色，拖动看准星，松手确认。
+class PhotoStage(FloatLayout):
+    """全屏取色区：整块都是取色板，按住即取，拖动跟手，松手确认。
 
-    之前是「必须按住 0.3 秒」，实际操作里几乎没人会按住那么久 ——
-    正常点一下约 100ms，抬手时计时器还没到，界面反而弹一句
-    「长按照片 0.3 秒」，看起来就是「点了没反应」。
+    **这里刻意不做任何窗口/矩阵换算**，只用 ``touch.pos - self.pos``。
 
-    现在改成：按下立刻取样并刷新放大预览，拖动实时跟随，抬手才写回颜色。
-    ``fit_mode="contain"`` 时图片是**居中**放在控件里的，四周有留白，
-    所以取样一律先把触点夹到图片矩形内，而不是拒绝并提示 ——
-    留白处也能吸到最边上的那个像素，不会再有「点了边框」的挫败感。
+    上一版是用 ``get_window_matrix()`` 算出「控件画在哪」，再拿 ``touch.sx/sy``
+    反推「手指在窗口的哪儿」，两者相减。但那两条都是**推导值**：矩阵要从
+    整条父容器的 ``to_window/to_widget`` 组合出来，手机实测仍然整体偏下
+    几百像素；而控件树派发给我们的 ``touch.pos``（减去自己的 ``pos``）才是
+    唯一权威的那份坐标 —— 按钮点得中，就证明它跟控件的绘制位置是一致的。
 
-    坐标一律换算成**控件局部坐标**再取样，转换分两步（见 :meth:`to_local_point`）：
-    先用 ``touch.sx/sy`` 还原手指的**窗口像素坐标**，再减去控件在窗口里的
-    **真实绘制原点**（``get_window_matrix()``）。**不能**用 ``touch.pos - self.pos``
-    —— 那两套坐标压根不是一个空间。
-
-    为什么按压点上方没有「准星」浮层：实测**照片这个 Image 会盖住同层级的
-    所有控件**（holder 里的兄弟、它自己的子控件都一样），浮层怎么摆都被照片
-    挡住。所以「正在吸哪个像素」的准星改画进下方放大图里（见 ZoomPreview）。
-    可点范围也无需画框：留白处会被夹到边缘像素，整个取色区都能按。
+    所以这一版把取色区做成**铺满窗口的独立层**：没有 ScrollView、没有页面
+    平移、父容器全在原点。于是「父容器坐标」和「窗口坐标」在这里是同一个
+    东西，按下与拖动无论走哪条派发路径，算出来的局部坐标都相同。
     """
 
-    def __init__(self, owner, **kwargs):
+    def __init__(self, on_sample=None, on_commit=None, **kwargs):
         kwargs.setdefault("size_hint", (1, 1))
-        source = kwargs.pop("source", "") or blank_png()   # 不是 Kivy 属性，得自己接住
+        source = kwargs.pop("source", "") or blank_png()
         super().__init__(**kwargs)
-        self.owner = owner
-        self._touch = None
-        self._scroll = None
-        self._scroll_state = None
-        self._origin = None      # 按下时的窗口原点；滚动已冻结，整段手势不变
+        self.on_sample = on_sample          # (rgb, u, v, dw, dh, force)
+        self.on_commit = on_commit          # (rgb)
+        self.pil = None                     # 取样用的 PIL 图（由调用方塞进来）
         self.sampling = False
         self.sample_center = (0.0, 0.0)
+        self._touch = None
 
         self._photo = Image(source=source, size_hint=(1, 1),
                             pos_hint={"x": 0, "y": 0}, fit_mode="contain")
         self.add_widget(self._photo)
-
-        # 换图时取样点会失效
+        # 换图后取样点失效
         self._photo.bind(texture=lambda *_: self.sampling and self._mark(None, None))
 
-    # ------------------------------------------------------------ 对外接口
+    # ------------------------------------------------------------ 对外
     @property
     def source(self):
         return self._photo.source
@@ -239,9 +231,18 @@ class ZoomPickImage(FloatLayout):
     def texture(self):
         return self._photo.texture
 
-    # ------------------------------------------------------------ 几何
-    def _local_image_rect(self):
-        """图片在本控件坐标系里的绘制矩形。
+    def to_local_point(self, touch):
+        """手指在控件里的位置（左下角原点，和 canvas 同一套）。
+
+        ``touch.pos`` 是 Kivy 派发到本控件的那份坐标（父容器坐标系），
+        ``self.pos`` 也正好是父容器坐标系里的值 —— 相减就是局部坐标。
+        不要换成 ``to_window()`` / ``get_window_matrix()``：那是把同一件事
+        再推导一遍，多一道推导就多一处能在手机上翻车的地方。
+        """
+        return touch.x - self.x, touch.y - self.y
+
+    def local_image_rect(self):
+        """图片在**控件局部坐标**里的绘制矩形：(x, y, w, h)；没图时 None。
 
         自己按 ``fit_mode="contain"`` 的规则算，而不是读图片控件的
         ``norm_image_size``：后者依赖子控件已经完成布局，测试里没有帧循环、
@@ -258,139 +259,14 @@ class ZoomPickImage(FloatLayout):
         return ((self.width - dw) / 2.0, (self.height - dh) / 2.0, dw, dh)
 
     def _mark(self, u, v):
-        """记录「正在取哪个像素」（准星画在下方放大图里，照片上不叠东西）。"""
-        rect = self._local_image_rect()
+        """记录「正在取哪个像素」（准星画在放大图里，照片上不叠东西）。"""
+        rect = self.local_image_rect()
         if rect is None or u is None:
             self.sampling = False
             return
-        lx, ly, dw, dh = rect
-        self.sample_center = (lx + u * dw, ly + v * dh)
+        x0, y0, dw, dh = rect
+        self.sample_center = (x0 + u * dw, y0 + v * dh)
         self.sampling = True
-
-    def local_image_rect(self):
-        """图片在**控件局部坐标**里的绘制矩形：(x, y, w, h)；没图时 None。"""
-        return self._local_image_rect()
-
-    def window_point(self, touch):
-        """触点所在的**窗口像素坐标**（左下角原点）。
-
-        ``touch.pos`` 不能用：它会被沿路容器改写（ScrollView 的
-        ``on_scroll_start`` / ``simulate_touch_down`` 里都会
-        ``touch.apply_transform_2d(self.to_local)`` 平移一次），而且
-        **按下走控件树、拖动和抬手走 Window 事件，两边的坐标系还不一样**
-        —— 同一个手指位置，按下时读出 1180，拖动时读出 1886，差 700px。
-        于是拖动/抬手那一下必然吸到别处去，这也是「取色点永远偏离手指」的根因。
-
-        ``sx`` / ``sy`` 是归一化窗口坐标，``apply_transform_2d`` 只改
-        x/y/px/py/ox/oy，**从不改 sx/sy**（见 kivy.input.motionevent），
-        而 ``scale_for_screen()`` 是拿 sx/sy 反算出 x/y 的 —— 也就是说
-        sx/sy 才是手指的真位置，乘回窗口尺寸即可，任何变换都动不了它。
-        """
-        from kivy.core.window import Window
-
-        w = Window.width or 1.0
-        h = Window.height or 1.0
-        try:
-            # 和 scale_for_screen() 用同一个换算，屏幕旋转时也对
-            return touch.to_absolute_pos(touch.sx, touch.sy, w, h,
-                                         int(getattr(Window, "rotation", 0)))
-        except (AttributeError, ValueError, TypeError):
-            return touch.sx * w, touch.sy * h
-
-    def window_origin(self):
-        """本控件左下角在**窗口**里的像素位置 —— 和画到屏幕上完全一致。
-
-        ``self.pos`` 是**父容器坐标**，跟实际画在哪隔着整条布局链（实测
-        差 546px：``self.pos`` 是 (28,731)，屏幕上却在 (56,1277)）。
-        ``to_window()`` 也不能用：ScrollView 只重写了 ``to_local/to_parent``
-        去补 ``g_translate``，不含各级父容器偏移，实测返回的就是 g_translate。
-
-        ``get_window_matrix()`` 是 Kivy 画图真正用的那个矩阵，拿它算出来的
-        原点与截图里照片的真实像素位置只差 1px（截图实测 435 vs 436）。
-        """
-        try:
-            m = self.get_window_matrix()
-            x, y, _ = m.transform_point(0, 0, 0)
-            return x, y
-        except Exception:                       # 没有窗口/纹理还没就绪
-            return self.x, self.y
-
-    def to_local_point(self, touch, origin=None):
-        """触摸 → **控件局部坐标**（左下角原点，和 canvas 同一套）。
-
-        两套坐标必须各归各位：手指位置一律取窗口坐标，控件原点一律取绘制
-        原点，相减才是「手指在控件里的哪儿」。以前写成 ``touch.pos - self.pos``
-        ——前者被 ScrollView 平移过、后者是父容器坐标，两个偏移并不会抵消，
-        结果就是用户看到的那样：按在照片中间，取到的却是照片另一头。
-        """
-        if origin is None:
-            origin = self._origin if self._origin is not None else self.window_origin()
-        wx, wy = self.window_point(touch)
-        return wx - origin[0], wy - origin[1]
-
-    # ------------------------------------------------------------ 触摸
-    def on_touch_down(self, touch):
-        if self.owner.pil_image is None or self._touch is not None:
-            return False
-        # 命中判定也必须在窗口坐标里做：collide_point 比的是 self.pos（父容器
-        # 坐标），和手指所在的窗口坐标差着整条布局链，按下点会整体错开。
-        origin = self.window_origin()
-        lx, ly = self.to_local_point(touch, origin)
-        if not (0 <= lx <= self.width and 0 <= ly <= self.height):
-            return False
-        self._origin = origin
-        self._touch = touch
-        self._freeze_scroll(True)
-        self._update(lx, ly)
-
-        from kivy.core.window import Window
-        Window.bind(on_touch_move=self._on_move, on_touch_up=self._on_up)
-        # 吃掉这一下：否则 ScrollView 会一边取色一边把页面拖走
-        return True
-
-    def _on_move(self, _win, touch):
-        if self._touch is None or touch.uid != self._touch.uid:
-            return
-        self._update(*self.to_local_point(touch))
-
-    def _on_up(self, _win, touch):
-        if self._touch is None or touch.uid != self._touch.uid:
-            return
-        lx, ly = self.to_local_point(touch)
-        # 补一帧不节流的预览：抬手看到的放大图必须就是取到的那个像素
-        self._update(lx, ly, force=True)
-        hit = self.sample_at(lx, ly)
-        self._end()
-        if hit is not None:
-            self.owner.on_sampled(*hit)
-
-    def _end(self):
-        self._touch = None
-        self._origin = None
-        self._freeze_scroll(False)
-        self._mark(None, None)
-        try:
-            from kivy.core.window import Window
-            Window.unbind(on_touch_move=self._on_move, on_touch_up=self._on_up)
-        except Exception:
-            pass
-
-    def _freeze_scroll(self, on):
-        """取色期间锁住页面滚动，手指下面的内容不能跟着跑。"""
-        if on:
-            node = self.parent
-            while node is not None and not isinstance(node, ScrollView):
-                node = node.parent
-            self._scroll = node
-            if node is not None:
-                self._scroll_state = (node.do_scroll_x, node.do_scroll_y)
-                node.do_scroll_x = False
-                node.do_scroll_y = False
-            return
-        if self._scroll is not None and self._scroll_state is not None:
-            self._scroll.do_scroll_x, self._scroll.do_scroll_y = self._scroll_state
-        self._scroll = None
-        self._scroll_state = None
 
     # ------------------------------------------------------------ 取样
     def sample_at(self, x, y):
@@ -399,11 +275,11 @@ class ZoomPickImage(FloatLayout):
         ``u`` / ``v`` 都是**左下角为原点**的归一化坐标。
 
         触点在图片外（``fit_mode="contain"`` 的留白）时夹到最近的边缘像素，
-        **不再拒绝**：留白区只比照片宽出一点，手指本来就容易偏出去一两毫米，
+        **不再拒绝**：留白区本来就只比照片宽一点，手指容易偏出去一两毫米，
         弹一句「不要点边框」只会让人以为点坏了。
         """
-        photo = self.owner.pil_image
-        rect = self._local_image_rect()
+        photo = self.pil
+        rect = self.local_image_rect()
         if photo is None or rect is None:
             return None
         x0, y0, dw, dh = rect
@@ -417,12 +293,148 @@ class ZoomPickImage(FloatLayout):
 
     def _update(self, x, y, force=False):
         hit = self.sample_at(x, y)
-        rect = self._local_image_rect()
+        rect = self.local_image_rect()
         if hit is None or rect is None:
             return
         rgb, u, v = hit
         self._mark(u, v)
-        self.owner.zoom_update(rgb, u, v, rect[2], rect[3], force)
+        if self.on_sample is not None:
+            self.on_sample(rgb, u, v, rect[2], rect[3], force)
+
+    # ------------------------------------------------------------ 触摸
+    def on_touch_down(self, touch):
+        if self.pil is None or self._touch is not None:
+            return False
+        if not self.collide_point(*touch.pos):
+            return False
+        self._touch = touch
+        touch.grab(self)
+        # 按下立刻取样：正常点一下只有 100ms 左右，等不得
+        self._update(*self.to_local_point(touch))
+        return True
+
+    def on_touch_move(self, touch):
+        # 不要用 touch.grab_current 判断：这个 Kivy 构建里 grab() 只往
+        # grab_list 里追加，grab_current 一直是 None（实测），拿它比会永远
+        # 判成「不是我的手指」，拖动和抬手全部失效。
+        if self._touch is None or touch is not self._touch:
+            return False
+        self._update(*self.to_local_point(touch))
+        return True
+
+    def on_touch_up(self, touch):
+        if self._touch is None or touch is not self._touch:
+            return False
+        lx, ly = self.to_local_point(touch)
+        # 补一帧不节流的预览：抬手看到的放大图必须就是取到的那个像素
+        self._update(lx, ly, force=True)
+        hit = self.sample_at(lx, ly)
+        touch.ungrab(self)
+        self._touch = None
+        self._mark(None, None)
+        if hit is not None and self.on_commit is not None:
+            self.on_commit(hit[0])
+        return True
+
+
+class PickOverlay(ModalView):
+    """全屏取色层。
+
+    照片铺满整块屏幕，取色区**不放进 ScrollView** —— 这就是这一版和上一版
+    最大的区别：手指坐标和照片的绘制位置从此处在同一套坐标里，没有页面
+    滚动、没有卡片偏移参与运算。
+
+    放大预览放在**顶部**：手指按在照片中下部时，它不会被自己的手挡住。
+    """
+
+    def __init__(self, screen, **kwargs):
+        kwargs.setdefault("size_hint", (1, 1))
+        kwargs.setdefault("auto_dismiss", False)
+        kwargs.setdefault("background_color", (0, 0, 0, 0.97))
+        super().__init__(**kwargs)
+        self.screen = screen
+
+        root = BoxLayout(orientation="vertical", spacing=D(6),
+                         padding=[0, D(6), 0, D(8)])
+
+        bar = BoxLayout(size_hint_y=None, height=D(46), spacing=D(10),
+                        padding=[D(14), 0, D(14), 0])
+        close = GhostButton(text="关闭", size_hint_x=None, width=D(78))
+        close.bind(on_release=lambda *_: self.dismiss())
+        self._hex = Title(text="#000000", font_size=S(22), halign="right")
+        bar.add_widget(close)
+        bar.add_widget(self._hex)
+        root.add_widget(bar)
+
+        self.preview = ZoomPreview()
+        self.preview.padding = [D(14), 0, D(14), 0]
+        root.add_widget(self.preview)
+
+        self.stage = PhotoStage(on_sample=self._on_sample,
+                                on_commit=self._on_commit,
+                                source=getattr(screen, "photo_path", "") or "")
+        self.stage.pil = getattr(screen, "pil_image", None)
+        root.add_widget(self.stage)
+        self.add_widget(root)
+        self.preview.reset()
+        self._fit_window()
+
+    # ------------------------------------------------------------ 尺寸
+    def on_open(self):
+        self._fit_window()
+
+    def _fit_window(self):
+        """铺满窗口。
+
+        取色区能不能对齐，全靠这一步：只要这一层和它的父容器都在原点、
+        且尺寸等于窗口，``touch.pos`` 和控件坐标就是同一套。
+        """
+        try:
+            from kivy.core.window import Window
+            self.size = Window.size
+            self.pos = (0, 0)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------ 回调
+    def _on_sample(self, rgb, u, v, dw, dh, force=False):
+        self._hex.text = "#%02X%02X%02X" % tuple(rgb[:3])
+        self.preview.update(self.stage.pil, rgb, u, v, dw, dh, force=force)
+
+    def _on_commit(self, rgb):
+        self.preview.commit(rgb)
+        self.screen.apply_sample(rgb)
+
+
+class TapArea(FloatLayout):
+    """一块「点一下就触发」的区域。
+
+    不用 Button，是因为里面要放一张 ``contain`` 的缩略图；``Image`` 本身
+    不吃触摸，事件会落回这里。按下只记位置、抬手才触发，中间位移超过阈值
+    就当是在滑页面，避免划着划着突然弹出全屏层。
+    """
+
+    def __init__(self, on_tap=None, **kwargs):
+        super().__init__(**kwargs)
+        self.on_tap = on_tap
+        self._down = None
+
+    def on_touch_down(self, touch):
+        if super().on_touch_down(touch):
+            return True
+        if self.on_tap is None or not self.collide_point(*touch.pos):
+            return False
+        self._down = (touch.uid, touch.x, touch.y)
+        return True
+
+    def on_touch_up(self, touch):
+        started, self._down = self._down, None
+        if started and started[0] == touch.uid:
+            moved = abs(touch.x - started[1]) + abs(touch.y - started[2])
+            if moved <= D(14) and self.collide_point(*touch.pos):
+                self.on_tap()
+                return True
+        return super().on_touch_up(touch)
 
 
 class PickScreen(Screen):
@@ -496,7 +508,7 @@ class PickScreen(Screen):
 
     def _build_gallery_card(self) -> Card:
         gal = Card()
-        gal.add_widget(Dim(text="从图库取色：按住照片拖动，松手即取当前像素",
+        gal.add_widget(Dim(text="从图库取色：点下面的照片，进入全屏取色",
                            font_size=S(FS_SMALL)))
         pick_btn = AccentButton(text="选择照片")
         pick_btn.bind(on_release=lambda *_: self._choose_photo())
@@ -504,9 +516,10 @@ class PickScreen(Screen):
         gal.add_widget(pick_btn)
 
         # 用 FloatLayout 而不是 RelativeLayout：RelativeLayout 里子控件的 pos
-        # 是「相对单位」(0~1)，拿 self._img.pos 去换算屏幕坐标会得到 y=0 这种
-        # 结果，取样和放大镜全会错位。
-        holder = FloatLayout(size_hint_y=None, height=D(self.HOLDER_MIN))
+        # 是「相对单位」(0~1)，里面子控件的 pos 也会是 0~1 的比值，
+        # 拿它去算屏幕坐标会得到 y=0 这种结果。
+        holder = TapArea(self.open_picker, size_hint_y=None,
+                         height=D(self.HOLDER_MIN))
         self._holder = holder
         with holder.canvas.before:
             Color(*hex_to_kivy(BG_ALT))
@@ -517,9 +530,10 @@ class PickScreen(Screen):
 
         # pos_hint 必须显式给：FloatLayout 不会给没有 pos_hint 的子控件定位，
         # 否则图片会跑到窗口左下角 (0,0)。
-        self._img = ZoomPickImage(self, size_hint=(1, 1),
-                                  pos_hint={"x": 0, "y": 0})
-        holder.add_widget(self._img)
+        self._thumb = Image(source=blank_png(), size_hint=(1, 1),
+                            pos_hint={"x": 0, "y": 0}, fit_mode="contain",
+                            nocache=True)
+        holder.add_widget(self._thumb)
 
         self._img_hint = Dim(text="尚未选择照片", font_size=S(FS_SMALL),
                              halign="center", pos_hint={"center_x": 0.5,
@@ -529,10 +543,11 @@ class PickScreen(Screen):
         holder.add_widget(self._img_hint)
         gal.add_widget(holder)
 
-        # 取样反馈条：放在照片正下方，手指按住照片时它就在旁边，
-        # 能一边拖一边看清正在取的像素。
-        self._preview = ZoomPreview()
-        gal.add_widget(self._preview)
+        self._open_hint = Dim(text="点照片进入全屏取色", font_size=S(FS_SMALL),
+                              halign="center")
+        self._open_hint.bind(width=lambda inst, val: setattr(inst, "text_size",
+                                                             (val, None)))
+        gal.add_widget(self._open_hint)
         return gal
 
     def _build_manual_card(self) -> Card:
@@ -582,13 +597,28 @@ class PickScreen(Screen):
             return
         self.pil_image = photo.pil
         self.photo_path = photo.path
-        self._img.source = photo.path       # 每次都是新的缓存文件名，不会命中旧缓存
+        self._thumb.source = photo.path     # 每次都是新的缓存文件名，不会命中旧缓存
         # 清文字而不是 opacity=0：这个开关拨过一次之后，控件的绘制状态就再也
         # 回不来（照片上的描边曾因此整层消失），没必要去碰它。
         self._img_hint.text = ""
         self._fit_holder(photo.width, photo.height)
-        self._preview.reset()               # 上一张图的放大结果不能留在新照片下面
-        self.app.toast("已载入照片，按住照片拖动取色")
+        # 选完照片直接进全屏取色：手机照片就那么大一块，缩在小卡片里根本
+        # 点不准，全屏之后每个像素都放大了。
+        self.open_picker()
+
+    def open_picker(self):
+        """打开全屏取色层。"""
+        if self.pil_image is None:
+            self.app.toast("先选一张照片")
+            return
+        self._overlay = PickOverlay(self)
+        # 不要淡入动画：动画期间 on_open 还没跑，尺寸没铺满窗口，
+        # 那几百毫秒里按下去会偏。
+        self._overlay.open(animation=False)
+
+    def apply_sample(self, rgb):
+        """全屏层里松手确认的颜色，写回全局当前颜色。"""
+        self.app.color_set(rgb, source="screen")
 
     def _fit_holder(self, w, h):
         """按照片宽高比调取色区高度，横图不留一大片空白。"""
@@ -602,21 +632,7 @@ class PickScreen(Screen):
             holder.height = target
 
     # ----------------------------------------------------------------- 取样反馈
-    def zoom_update(self, rgb, u, v, dw, dh, force=False):
-        """手指下面那一个像素的实时预览（由 ZoomPickImage 调用）。
-
-        不做浮层放大镜：实测这个环境下浮层/自绘 canvas/自定义纹理都不渲染，
-        只有「普通控件 + Image(source=文件)」稳定 —— 详见 ZoomPreview 的注释。
-        """
-        self._preview.update(self.pil_image, rgb, u, v, dw, dh, force=force)
-
-    def zoom_reset(self):
-        self._preview.reset()
-
-    def on_sampled(self, px, rel_x, rel_y):
-        self.app.color_set(px, source="screen")
-        self._preview.commit(px)
-        self.app.toast(f"已吸色 #{px[0]:02X}{px[1]:02X}{px[2]:02X}")
+    # 全屏取色层的回调在 PickOverlay 里，这里只需要把最终颜色写回全局。
 
     # ----------------------------------------------------------------- 手动
     def _apply_hex(self):
