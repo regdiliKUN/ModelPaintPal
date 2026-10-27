@@ -12,6 +12,12 @@ Windows 模型涂装配色助手：屏幕取色、模型漆匹配、可执行滴
 本轮修复配方滴数与比例不同步、单色提示冲突、建议排序、跨产品线混配、用量口径、冻结包Qt依赖和热键线程生命周期。
 数字色卡与混色仍是近似预测，正式涂装前请先试喷。
 
+## 安卓版
+
+手机端安装包在独立仓库 [**ModelPaintPal-APK**](https://github.com/regdiliKUN/ModelPaintPal-APK)，
+当前 **1.4.0**：图库照片全屏取色、6× 放大预览带准星、按住即取拖动跟随。
+本仓库的 `apk/` 目录不入库（见 `.gitignore`），只在本地留档。
+
 ## 开发
 
 使用 Python 3.12。在 `src/ModelPaintPal` 下安装 `requirements-lock.txt`，然后运行：
