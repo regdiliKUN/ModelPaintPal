@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import List, Sequence, Tuple
 
 from ..core.color_models import rgb_to_hex
-from ..core.delta_e import delta_e_rgb
+from ..core.delta_e import delta_e_rgb, format_delta_e
 from ..services.paint_matcher import PaintSuggestion
 from .widgets.color_wheel import WheelMarker
 from .widgets.swatch_card import SwatchItem, index_badge
@@ -36,7 +36,7 @@ def build_swatches(suggestion: PaintSuggestion,
     if not suggestion.is_direct:
         items.append(SwatchItem(
             suggestion.recipe.mixed_rgb, "混合结果",
-            f"ΔE {suggestion.delta_e:.2f}", index=2,
+            format_delta_e(suggestion.delta_e), index=2,
             delta_e=suggestion.delta_e,
         ))
 
@@ -83,7 +83,7 @@ def build_legend(suggestion: PaintSuggestion,
     lines = [f"{index_badge(1)} 目标色 {rgb_to_hex(target_rgb)}"]
     if not suggestion.is_direct:
         lines.append(f"{index_badge(2)} 混合结果 {suggestion.recipe.mixed_hex}"
-                     f"（ΔE {suggestion.delta_e:.2f}）")
+                     f"（{format_delta_e(suggestion.delta_e)}）")
     for comp in suggestion.recipe.components:
         lines.append(f"{index_badge(len(lines) + 1)} {comp.paint.brand_label} "
                      f"{comp.paint.code} {comp.paint.name} · {comp.drops} 滴")

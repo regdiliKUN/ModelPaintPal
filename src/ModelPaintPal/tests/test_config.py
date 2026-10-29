@@ -135,3 +135,100 @@ class TestConfigAttributeGuard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ComponentLimitConsistencyTest(unittest.TestCase):
+    """「最多组分」的配置上限必须与引擎能力、界面范围三者一致。
+
+    引擎只搜索单色/双色/三色；界面控件范围是 1–3。此前 ``validate()`` 允许 4，
+    手改配置成 4 的用户会得到「看起来设了 4、实际最多 3」的静默失效。
+    """
+
+    def test_validate_caps_at_three(self):
+        from app.core.config import AppConfig
+
+        cfg = AppConfig()
+        cfg.max_recipe_components = 4
+        self.assertEqual(cfg.validate().max_recipe_components, 3)
+        cfg.max_recipe_components = 0
+        self.assertEqual(cfg.validate().max_recipe_components, 1)
+
+    def test_settings_spinbox_range_matches_engine(self):
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from tests import qt_cleanup
+
+        qt_cleanup.install()
+        from PySide6.QtWidgets import QApplication
+
+        from app.core.config import AppConfig
+        from app.ui.panels.settings_panel import SettingsPanel
+
+        app = QApplication.instance() or QApplication([])
+        panel = SettingsPanel(AppConfig())
+        try:
+            self.assertEqual(panel._max_components.minimum(), 1)
+            self.assertEqual(panel._max_components.maximum(), 3)
+        finally:
+            panel.deleteLater()
+            app.processEvents()
+
+    def test_recipes_never_exceed_config(self):
+        from app.core.config import AppConfig
+        from app.services.paint_matcher import PaintMatcher
+
+        matcher = PaintMatcher()
+        for limit in (1, 2, 3):
+            cfg = AppConfig().validate()
+            cfg.max_recipe_components = limit
+            for target in ((120, 96, 72), (216, 118, 68)):
+                for item in matcher.suggest(target, cfg):
+                    self.assertLessEqual(len(item.recipe.components), limit,
+                                         f"limit={limit} 却给出了更多组分")
+
+
+class ExtremeConfigTest(unittest.TestCase):
+    """极端配置组合下的行为约定。
+
+    单个参数各自的边界已有测试，但**组合**没有：容差最小 + 条数最大 + 组分最大 +
+    滴数最大同时出现时，既不该崩，也不该给出超出配置的配方。这轮把这些组合跑一遍，
+    确认没有缺陷（此前完全没有覆盖）。
+    """
+
+    def test_min_and_max_combinations_do_not_break(self):
+        from app.core.config import AppConfig
+        from app.services.paint_matcher import PaintMatcher
+
+        matcher = PaintMatcher()
+        cases = [
+            dict(match_tolerance=0.2, max_suggestions=20, max_recipe_components=3,
+                 drop_total=200, area_m2=50.0, coats=8, thinner_ratio=5.0,
+                 waste_buffer=3.0, fixed_paint_loss_ml=20.0),
+            dict(match_tolerance=20.0, max_suggestions=1, max_recipe_components=1,
+                 drop_total=4, area_m2=0.0005, coats=1, thinner_ratio=0.0,
+                 waste_buffer=1.0, fixed_paint_loss_ml=0.0),
+        ]
+        for overrides in cases:
+            cfg = AppConfig().validate()
+            for key, value in overrides.items():
+                setattr(cfg, key, value)
+            cfg.validate()
+            items = matcher.suggest((216, 118, 68), cfg)
+            self.assertLessEqual(len(items), cfg.max_suggestions)
+            for item in items:
+                self.assertLessEqual(len(item.recipe.components),
+                                     cfg.max_recipe_components)
+                self.assertGreaterEqual(item.coverage.paint_ml, 0.0)
+                self.assertTrue(all(c.drops >= 0 for c in item.recipe.components))
+
+    def test_drop_total_respected_at_the_extremes(self):
+        from app.core.config import AppConfig
+        from app.services.paint_matcher import PaintMatcher
+
+        matcher = PaintMatcher()
+        for total in (4, 200):
+            cfg = AppConfig().validate()
+            cfg.drop_total = total
+            for item in matcher.suggest((216, 118, 68), cfg):
+                if not item.is_direct:
+                    self.assertEqual(sum(c.drops for c in item.recipe.components), total)

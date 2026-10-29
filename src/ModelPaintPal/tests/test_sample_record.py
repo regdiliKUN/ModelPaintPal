@@ -77,3 +77,65 @@ class TestRecordFromDictRobust(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecordOrNoneTest(unittest.TestCase):
+    """历史/收藏列表的严格解析：还原不出颜色就丢掉，不要伪造纯黑。
+
+    `record_from_dict` 刻意宽容（解析失败回落纯黑），这对「必须返回一条记录」的
+    调用方是对的；但列表 UI 不能这么干——一块纯黑色块和真实记录长得一模一样，
+    用户会以为自己取过这个颜色，删都不知道删哪条。
+    """
+
+    def test_valid_rgb(self):
+        from app.core.sample_record import record_or_none
+
+        record = record_or_none({"rgb": [10, 20, 30], "hex": "#0A141E"})
+        self.assertIsNotNone(record)
+        self.assertEqual(record.hex, "#0A141E")
+
+    def test_hex_only_is_accepted(self):
+        from app.core.sample_record import record_or_none
+
+        self.assertIsNotNone(record_or_none({"hex": "#112233"}))
+        self.assertIsNotNone(record_or_none({"hex": "112233"}))
+
+    def test_unusable_entries_are_dropped(self):
+        from app.core.sample_record import record_or_none
+
+        for bad in ("不是字典", None, 42, {}, {"bad": 1},
+                    {"hex": "zzz"}, {"rgb": "red"}, {"rgb": [1, 2]}):
+            self.assertIsNone(record_or_none(bad), f"{bad!r} 不该被当成有效记录")
+
+    def test_out_of_range_rgb_is_clamped_not_dropped(self):
+        """越界通道值能夹紧就夹紧——它是能还原的颜色，不该丢。"""
+        from app.core.sample_record import record_or_none
+
+        record = record_or_none({"rgb": [999, -20, 128]})
+        self.assertIsNotNone(record)
+        self.assertEqual(record.rgb, (255, 0, 128))
+
+
+class StoreDropsCorruptEntriesTest(unittest.TestCase):
+    """存储层确实把无效条目过滤掉了（而不只是函数能返回 None）。"""
+
+    def test_history_and_favorites_skip_corrupt_rows(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from app.core.favorites_store import FavoritesStore
+        from app.core.history_store import HistoryStore
+
+        rows = [{"hex": "#112233", "rgb": [17, 34, 51]}, "不是字典",
+                {"hex": "zzz"}, {"bad": 1}]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "history.json").write_text(json.dumps(rows), encoding="utf-8")
+            (root / "favorites.json").write_text(json.dumps(rows), encoding="utf-8")
+            with patch("app.core.storage.user_path", side_effect=lambda *p: root.joinpath(*p)):
+                history = HistoryStore(limit=10).all()
+                favorites = FavoritesStore(limit=10).all()
+        self.assertEqual([rec.hex for rec in history], ["#112233"])
+        self.assertEqual([rec.hex for rec in favorites], ["#112233"])

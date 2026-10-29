@@ -14,7 +14,10 @@ from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from ..core.logging_setup import get_logger
 from .theme import Palette, font
+
+logger = get_logger(__name__)
 
 __all__ = ["OnboardingOverlay", "OnboardingStep", "DEFAULT_STEPS"]
 
@@ -136,7 +139,8 @@ class OnboardingOverlay(QWidget):
             return None
         try:
             widget = getter() if callable(getter) else getter
-        except Exception:
+        except Exception as exc:  # 高亮目标取不到就退化成无高亮，但要知道是谁坏了
+            logger.debug("引导目标控件获取失败（跳过该步高亮）: %s", exc)
             return None
         if widget is None or not widget.isVisible():
             return None

@@ -30,18 +30,34 @@ from app.core.config import AppConfig  # noqa: E402
 from app.ui.main_window import MainWindow  # noqa: E402
 
 SHOTS = [
-    # (文件名, 说明, 需要取色, 目标标签页, 窗口尺寸)
-    ("10-empty.png", "空状态", False, 0, (1280, 860)),
-    ("11-suggest.png", "配色建议", True, 0, (1280, 860)),
-    ("12-visual.png", "色卡对比", True, 1, (1280, 860)),
-    ("13-coverage.png", "用量参数", True, 2, (1280, 860)),
-    ("14-settings.png", "设置", True, 3, (1280, 860)),
-    ("15-onboarding.png", "新手引导", True, 0, (1280, 860)),
-    ("16-narrow.png", "窄窗口 1024×720", True, 1, (1024, 720)),
-    ("17-tall.png", "窄高窗口 900×1000", True, 0, (900, 1000)),
-    ("18-tuner.png", "调色微调展开", True, 0, (1280, 860)),
-    ("19-error.png", "输入错误提示", False, 0, (1280, 860)),
+    # (文件名, 说明, 需要取色, 目标页签（按名字，不按序号）, 窗口尺寸)
+    #
+    # 这里**按名字**取页签：按序号取的话，每加一个页签后面全错位，而且错位是
+    # 静默的——截图照样生成，只是拍的是别的页。此前「用量参数/设置」两张就已经
+    # 拍错了页，因为当时还只有 4 个页签。
+    ("10-empty.png", "空状态", False, "suggest", (1280, 860)),
+    ("11-suggest.png", "配色建议", True, "suggest", (1280, 860)),
+    ("12-visual.png", "色卡对比", True, "visualize", (1280, 860)),
+    ("13-coverage.png", "用量参数", True, "coverage", (1280, 860)),
+    ("14-settings.png", "设置", True, "settings", (1280, 860)),
+    ("15-onboarding.png", "新手引导", True, "suggest", (1280, 860)),
+    ("16-narrow.png", "窄窗口 1024×720", True, "visualize", (1024, 720)),
+    ("17-tall.png", "窄高窗口 900×1000", True, "suggest", (900, 1000)),
+    ("18-tuner.png", "调色微调展开", True, "suggest", (1280, 860)),
+    ("19-error.png", "输入错误提示", False, "suggest", (1280, 860)),
+    ("20-scheme.png", "基础配色（五瓶）", True, "scheme", (1280, 860)),
+    ("21-plan.png", "配色方案（色环）", True, "plan", (1280, 860)),
 ]
+
+# 页签名字 → 主窗口上的面板属性名
+_TAB_PANELS = {
+    "suggest": "_suggest_panel",
+    "visualize": "_visualize_panel",
+    "scheme": "_scheme_panel",
+    "plan": "_plan_panel",
+    "coverage": "_coverage_panel",
+    "settings": "_settings_panel",
+}
 
 
 def _pump(app: QApplication, seconds: float = 0.6) -> None:
@@ -65,7 +81,7 @@ def main() -> int:
     config.show_onboarding = False
     config.auto_copy_on_pick = False
 
-    for name, caption, need_color, tab, (width, height) in SHOTS:
+    for name, caption, need_color, tab_name, (width, height) in SHOTS:
         window = MainWindow(config)
         window.setAttribute(Qt.WA_DontShowOnScreen, True)
         window.resize(width, height)
@@ -78,7 +94,20 @@ def main() -> int:
                 app.processEvents()
                 time.sleep(0.01)
             window._render_suggestions()
-        window._tabs.setCurrentIndex(tab)
+        panel = getattr(window, _TAB_PANELS[tab_name], None)
+        index = window._tabs.indexOf(panel) if panel is not None else -1
+        if index < 0:
+            raise SystemExit(f"找不到页签 {tab_name}（面板属性 {_TAB_PANELS[tab_name]}）")
+        window._tabs.setCurrentIndex(index)
+        # 切页后给异步计算留出完成时间（配色方案/基础配色都在工作线程里算）
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if tab_name == "plan" and window._plan_stops:
+                break
+            if tab_name == "scheme" and window._mix_recipe is not None:
+                break
+            time.sleep(0.01)
         if name.startswith("15"):
             window._start_onboarding()
         if name.startswith("18"):

@@ -8,11 +8,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..core.config import AppConfig
 from ..core.color_models import normalize_rgb, rgb_to_lab, rgb_to_linear
-from ..core.delta_e import DeltaEGrade, delta_e, grade_delta_e
+from ..core.delta_e import DeltaEGrade, format_delta_e, grade_delta_e, resolve_delta_e
 from ..data.paint_db import PaintDatabase, PaintEntry, get_database
 from ..data.brands import BRANDS
 from ..core.logging_setup import get_logger
@@ -27,6 +27,9 @@ __all__ = ["PaintSuggestion", "PaintMatcher", "MATCH_POOL_SIZE"]
 
 # 参与配方搜索的候选池大小（取目标色的最近 N 个可混色号）
 MATCH_POOL_SIZE = 16
+
+# 已经提醒过的未注册品牌键（避免每次 suggest 都刷同一条警告）
+_warned_unknown_brands: set = set()
 
 
 @dataclass
@@ -78,14 +81,21 @@ class PaintMatcher:
     """配色建议计算器（无状态，可复用）。"""
 
     def __init__(self, db: Optional[PaintDatabase] = None) -> None:
-        self._db = db or get_database()
+        # 必须判 None 而不是判真假：PaintDatabase 实现了 __len__，空库是「假值」，
+        # ``db or get_database()`` 会把调用方明确传入的空库悄悄换成全库——
+        # 「空库应该返回空建议」的边界用例因此永远测不出来（拿到的是 672 条）。
+        self._db = db if db is not None else get_database()
+        # 搜索缓存：见 _search_cache_for。只保留最近一个目标色，内存有界。
+        self._search_cache: dict = {}
+        self._search_cache_key: Optional[tuple] = None
 
     @property
     def db(self) -> PaintDatabase:
         return self._db
 
     # ------------------------------------------------------------------ 候选
-    def candidate_pool(self, config: AppConfig, brands: Optional[Sequence[str]] = None):
+    def candidate_pool(self, config: AppConfig,
+                       brands: Optional[Sequence[str]] = None) -> List[PaintEntry]:
         """按品牌范围 + 可调和性过滤出候选池。
 
         ``brands`` 的三种取值语义**必须**区分开（此前用 ``brands or None`` 把它们
@@ -96,9 +106,25 @@ class PaintMatcher:
         * ``[...]``—— 只用列出的品牌。
         """
         if brands is None:
-            keys = list(config.preferred_brands)
+            requested = list(config.preferred_brands)
         else:
-            keys = [key for key in brands if key]
+            requested = [key for key in brands if key]
+        # 未注册的品牌键（品牌改名、手改配置拼错、旧配置残留）在 by_brands 里会被
+        # 静默忽略。这里显式剔除并留痕，同时保留「点名了品牌但一个都不存在 = 无候选」
+        # 的既有语义——不能悄悄放开成全库，那等于把用户的品牌限制悄悄取消掉。
+        unknown = [key for key in requested if key not in BRANDS]
+        if unknown:
+            # 每次 suggest 都会走到这里，同一条警告刷几十遍只会把日志刷满
+            # （日志文件 1 MB 就轮转）。同一批键只提醒一次。
+            fresh = [key for key in unknown if key not in _warned_unknown_brands]
+            if fresh:
+                _warned_unknown_brands.update(fresh)
+                logger.warning("忽略未注册的品牌键: %s（可用品牌见 app/data/brands.py）",
+                               "、".join(sorted(fresh)))
+        keys = [key for key in requested if key in BRANDS]
+        if requested and not keys:
+            logger.warning("品牌范围里的键全部未注册，按无候选处理")
+            return []
         pool = self._db.by_brands(keys) if keys else list(self._db.entries)
         filtered = [entry for entry in pool
                     if entry.is_mixable(config.allow_metallic_in_mix, config.allow_clear_in_mix)]
@@ -107,10 +133,56 @@ class PaintMatcher:
             filtered = pool
         return filtered
 
-    def rank_by_distance(self, target_lab: Sequence[float], pool, formula: str, limit: int):
-        scored = [(delta_e(entry.lab, target_lab, formula), entry) for entry in pool]
+    def rank_by_distance(self, target_lab: Sequence[float], pool, formula: str,
+                         limit: int) -> List[Tuple[float, PaintEntry]]:
+        # 按全库条数跑的单色排序：公式解析一次即可，逐条 delta_e() 会重复做字符串处理
+        de_fn = resolve_delta_e(formula)
+        scored = [(de_fn(entry.lab, target_lab), entry) for entry in pool]
         scored.sort(key=lambda item: item[0])
         return scored[: max(1, limit)]
+
+    def _search_cache_for(self, target_lab: Sequence[float], config: AppConfig) -> dict:
+        """取本次搜索用的缓存（必要时重建）。
+
+        缓存内容是「某个色号对/三元组在该目标色下的最优配比」，它只取决于
+        **目标色 + 混合模型 + 色差公式**——与容差、总滴数、候选池组成都无关：
+        容差只是拿结果去比较，池子换了同一对色号的最优配比还是那个。
+
+        因此可以安全地跨多次 ``suggest`` 复用。收益最明显的是「用量参数」页：
+        拖面积/层数/稀释比会触发整段重算，但搜索输入一个字都没变，整段直接命中。
+
+        只保留最近一个目标色的缓存（界面同时只处理一个取色），换目标色整体丢弃，
+        内存有界；即使多个工作线程交替用不同目标色，最坏也只是各自少命中，
+        不会读到别人的缓存（每次调用都持有自己那份 dict 的引用）。
+        """
+        key = (tuple(round(float(v), 6) for v in target_lab),
+               config.mixing_model, config.delta_e_formula)
+        if self._search_cache_key != key:
+            self._search_cache = {}
+            self._search_cache_key = key
+        return self._search_cache
+
+    def _candidate_pools(self, ranked_all, pool, limit):
+        """把候选池切成三层，并预转线性光。
+
+        返回 ``(ranked, nearest_pool, compatible_pools, linear_of)``：
+
+        * ``ranked`` —— 全局最近的若干条（供锚点遍历）；
+        * ``nearest_pool`` —— 全局前 ``MATCH_POOL_SIZE`` 条（跨品牌混配时用）；
+        * ``compatible_pools`` —— 每个产品线各自最近的 ``MATCH_POOL_SIZE`` 条，
+          避免全库前 16 条被其他产品线占满；
+        * ``linear_of`` —— ``{uid: 线性光}`` 预计算表，后续每个锚点直接查表复用，
+          不再对同一批候选反复做 RGB→线性光转换（suggest 的主要耗时点）。
+        """
+        ranked = ranked_all[:max(MATCH_POOL_SIZE, limit * 3)]
+        nearest_pool = [entry for _, entry in ranked[:MATCH_POOL_SIZE]]
+        compatible_pools: Dict[str, list] = {}
+        for _, entry in ranked_all:
+            group = compatible_pools.setdefault(entry.brand_key, [])
+            if len(group) < MATCH_POOL_SIZE:
+                group.append(entry)
+        linear_of = {entry.uid: rgb_to_linear(entry.rgb) for entry in pool}
+        return ranked, nearest_pool, compatible_pools, linear_of
 
     # ------------------------------------------------------------------ 主入口
     def suggest(self,
@@ -126,7 +198,12 @@ class PaintMatcher:
         # 防御性归一化：夹紧到 0-255 整数三元组，避免浮点/越界目标色把下游转换搞崩
         target_rgb = normalize_rgb(target_rgb)
         target_lab = rgb_to_lab(target_rgb)
-        limit = max_results or config.max_suggestions
+        # 只有 None 才表示「用配置里的默认条数」；0 / 负数表示「一条都不要」。
+        # 此前写成 ``max_results or config.max_suggestions``，把 0 当成没传，
+        # 调用方明确要求空结果却拿到 6 条——是个安静的反直觉行为。
+        limit = config.max_suggestions if max_results is None else int(max_results)
+        if limit <= 0:
+            return []
         pool = self.candidate_pool(config, brands)
         if not pool:
             logger.warning("色号库为空或品牌范围无匹配")
@@ -139,18 +216,12 @@ class PaintMatcher:
             brand_scope = [key for key in brands if key] or None
 
         ranked_all = self.rank_by_distance(target_lab, pool, config.delta_e_formula, len(pool))
-        ranked = ranked_all[:max(MATCH_POOL_SIZE, limit * 3)]
-        nearest_pool = [entry for _, entry in ranked[:MATCH_POOL_SIZE]]
-        # 各产品线分别保留最近候选，避免全库前16条被其他产品线占满。
-        compatible_pools: Dict[str, list] = {}
-        for _, entry in ranked_all:
-            group = compatible_pools.setdefault(entry.brand_key, [])
-            if len(group) < MATCH_POOL_SIZE:
-                group.append(entry)
-
-        # 一次性把候选池的 RGB→线性光算好，后续每个锚点直接查表复用，
-        # 不再对每个锚点重复转换（这是 suggest 的主要耗时点）。
-        linear_of = {entry.uid: rgb_to_linear(entry.rgb) for entry in pool}
+        ranked, nearest_pool, compatible_pools, linear_of = self._candidate_pools(
+            ranked_all, pool, limit)
+        # 各锚点的候选池高度重叠（同一品牌下只是把锚点换到队首），色号对/三元组的
+        # 搜索结果可以跨锚点复用；再往上抬一层，同一目标色的**多次** suggest 也能复用
+        # （改面积/层数/稀释比、调容差都会重算，但搜索输入没变）。
+        pair_cache = self._search_cache_for(target_lab, config)
 
         suggestions: List[PaintSuggestion] = []
         used_keys: set = set()
@@ -170,6 +241,7 @@ class PaintMatcher:
                 is_primary=(rank == 1),
                 used_keys=used_keys,
                 brand_scope=brand_scope,
+                pair_cache=pair_cache,
             )
             if suggestion is not None:
                 suggestions.append(suggestion)
@@ -185,10 +257,12 @@ class PaintMatcher:
                          coverage_input: Optional[CoverageInput],
                          is_primary: bool,
                          used_keys: set,
-                         brand_scope: Optional[Sequence[str]] = None) -> Optional[PaintSuggestion]:
+                         brand_scope: Optional[Sequence[str]] = None,
+                         pair_cache: Optional[dict] = None) -> Optional[PaintSuggestion]:
         """为单个锚点构造一条建议；返回 ``None`` 表示该锚点被跳过（无解/重复）。"""
         recipe = self._solve_for(target_lab, anchor, nearest_pool, config,
-                                is_primary=is_primary, linear_of=linear_of)
+                                is_primary=is_primary, linear_of=linear_of,
+                                pair_cache=pair_cache)
         if recipe is None:
             return None
         key = recipe.key
@@ -225,7 +299,8 @@ class PaintMatcher:
 
     # ------------------------------------------------------------------ 内部
     def _solve_for(self, target_lab, anchor: PaintEntry, pool, config: AppConfig,
-                   is_primary: bool, linear_of: dict) -> Optional[Recipe]:
+                   is_primary: bool, linear_of: dict,
+                   pair_cache: Optional[dict] = None) -> Optional[Recipe]:
         """为主锚点求解配方。首要建议允许 3 色，其余限制 2 色以控制计算量。
 
         ``linear_of`` 为 ``{entry: 线性光}`` 预计算表，由 ``suggest`` 一次性构建后复用。
@@ -253,6 +328,7 @@ class PaintMatcher:
             drop_total=config.drop_total,
             tolerance=config.match_tolerance,
             prepared=prepared,
+            pair_cache=pair_cache,
         )
         if recipe is None:
             return build_direct_recipe(anchor, target_lab, config.delta_e_formula)
@@ -319,7 +395,7 @@ class PaintMatcher:
         if recipe.direct:
             label = ("单色匹配在容差内，无需混色" if recipe.delta_e <= config.match_tolerance
                      else "单色近似（色差偏大），无需混色但需接受色偏")
-            notes.append(f"{label}；预测色差 ΔE {recipe.delta_e:.2f}")
+            notes.append(f"{label}；预测色差 {format_delta_e(recipe.delta_e)}")
         else:
             drops = recipe.drops_text()
             notes.append(f"按 {drops} 滴配比调匀（{recipe.percent_text()}）")
@@ -346,5 +422,5 @@ def summarize(suggestions: Sequence[PaintSuggestion]) -> str:
     best = suggestions[0]
     # 保留两位：卡片上写 ΔE 2.96、状态栏写 3.0 会让人以为是两次不同的计算
     if best.is_direct:
-        return f"最接近：{best.anchor.full_label}（ΔE {best.delta_e:.2f}）"
-    return f"推荐调配：{best.recipe.components_text()}（ΔE {best.delta_e:.2f}）"
+        return f"最接近：{best.anchor.full_label}（{format_delta_e(best.delta_e)}）"
+    return f"推荐调配：{best.recipe.components_text()}（{format_delta_e(best.delta_e)}）"

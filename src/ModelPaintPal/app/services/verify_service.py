@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
 from ..core.color_models import hex_to_rgb
-from ..core.delta_e import delta_e
+from ..core.delta_e import delta_e, format_delta_e
 from ..core.http_client import DEFAULT_TIMEOUT, fetch_all
 from ..core.logging_setup import get_logger
 from ..core.storage import JsonStore
@@ -136,7 +136,7 @@ class VerifyReport:
             return "没有可查询的核验源，本地值保持不变。"
         best = self.best
         if best is not None:
-            gap = "" if best.delta_e is None else f"ΔE {best.delta_e:.2f}"
+            gap = "" if best.delta_e is None else format_delta_e(best.delta_e)
             return (f"{len(self.ok_hits)} 个源响应，与本地值最接近的是"
                     f"「{best.name}」{best.hex or ''}（{gap}）。"
                     f"本地值 {self.local_hex} 未被自动修改。")

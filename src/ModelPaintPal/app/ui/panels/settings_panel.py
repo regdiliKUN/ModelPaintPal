@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
@@ -21,6 +21,9 @@ from ...services.mixing import MIXING_MODELS, describe_model
 from ..widgets.form_row import form_label, hint_label, with_hint
 
 __all__ = ["SettingsPanel"]
+
+# 热键输入去抖：足够长到能输完一个组合键，又不至于让人以为没生效
+_HOTKEY_DEBOUNCE_MS = 400
 
 _FIELD_WIDTH = 200
 
@@ -52,10 +55,19 @@ class SettingsPanel(QFrame):
     onboardingRequested = Signal()
     databaseChanged = Signal()
     settingsChanged = Signal()     # 影响配色结果的项（容差/条数/模型/混色许可）
+    # 请求把配置落盘。**不在这里直接 save_config**：save_config 是原子写 + fsync
+    # （实测 3.8 ms/次），而本页 8 个数值控件都是逐格触发 valueChanged，
+    # 拖一次滑块就是十几次写盘。落盘时机交给主窗口去抖。
+    persistRequested = Signal()
 
     def __init__(self, config: AppConfig, parent=None) -> None:
         super().__init__(parent)
         self._config = config
+        self._hotkey_timer = QTimer(self)
+        self._hotkey_timer.setSingleShot(True)
+        self._hotkey_timer.setInterval(_HOTKEY_DEBOUNCE_MS)
+        self._hotkey_timer.timeout.connect(self._commit_hotkeys)
+
         self._updating = True
 
         outer = QVBoxLayout(self)
@@ -287,7 +299,20 @@ class SettingsPanel(QFrame):
 
     # ------------------------------------------------------------------ 同步
     def sync_from_config(self) -> None:
+        """按配置回填全部控件。
+
+        ``_updating`` 必须用 try/finally 复位：这里是十几个 setValue/setChecked，
+        任何一个抛异常（比如校准记录文件坏了）都会让 ``_updating`` 永久停在 True，
+        之后用户改这个页面上的**任何**设置都会被 ``_commit`` 静默丢弃——
+        界面还在，但设置不再生效，而且没有任何提示。
+        """
         self._updating = True
+        try:
+            self._sync_widgets()
+        finally:
+            self._updating = False
+
+    def _sync_widgets(self) -> None:
         cfg = self._config
         self._zoom.setValue(cfg.magnifier_zoom)
         self._grid.setValue(cfg.magnifier_grid)
@@ -310,7 +335,6 @@ class SettingsPanel(QFrame):
         self._allow_online.setChecked(bool(getattr(cfg, "check_updates_on_start", False)))
         self._refresh_calibration()
         self._last_match_sig = self._match_signature()
-        self._updating = False
 
     def _refresh_calibration(self) -> None:
         mapping = calibration_map()
@@ -320,6 +344,11 @@ class SettingsPanel(QFrame):
         self._calibration.setText("\n".join(
             f"{uid.split(':')[-1]} → {value}" for uid, value in list(mapping.items())[:12]
         ))
+
+    def _commit_hotkeys(self) -> None:
+        """热键输入停手后：落盘并让主窗口重新注册。"""
+        self.persistRequested.emit()
+        self.hotkeysChanged.emit()
 
     # ------------------------------------------------------------------ 提交
     def _commit(self) -> None:
@@ -344,7 +373,7 @@ class SettingsPanel(QFrame):
         cfg.show_onboarding = self._show_onboarding.isChecked()
         cfg.check_updates_on_start = self._allow_online.isChecked()
         cfg.validate()
-        save_config(cfg)
+        self.persistRequested.emit()
         # 容差/条数/模型/混色许可会改变匹配结果，必须让主窗口重算，
         # 否则用户改完设置回到建议页会看到"没生效"的旧结果。
         signature = self._match_signature()
@@ -362,12 +391,16 @@ class SettingsPanel(QFrame):
         self.hotkeysChanged.emit()
 
     def _on_hotkey_changed(self) -> None:
+        """热键输入框是 textChanged，逐字符触发。
+
+        直接落盘 + 重新注册热键的话，输入 "Ctrl+Shift+X" 会写 12 次盘、
+        并 12 次注销/重注册 Win32 热键（每次都要停线程）。这里等用户停手再说。
+        """
         if self._updating:
             return
         self._config.pick_hotkey = self._pick_hotkey.text().strip()
         self._config.copy_hex_hotkey = self._copy_hotkey.text().strip()
-        save_config(self._config)
-        self.hotkeysChanged.emit()
+        self._hotkey_timer.start()
 
     def _reset_calibration(self) -> None:
         if reset_calibration():

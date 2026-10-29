@@ -562,6 +562,27 @@ class TestSummarizeAndPool(unittest.TestCase):
         self.assertTrue(pool)
         self.assertTrue(all(e.brand_key == "tamiya" for e in pool))
 
+    def test_unknown_brand_key_is_dropped_not_silently_ignored(self):
+        """未注册的品牌键要被显式剔除，不能让候选池「莫名变大/变小」。
+
+        改过名的品牌、手改配置拼错的键，``by_brands`` 会静默跳过。此前若整个
+        列表都是未知键，候选池会变成全库 —— 用户以为限定了品牌，实际搜的是全部。
+        """
+        cfg = AppConfig()
+        clean = self.matcher.candidate_pool(cfg, ["tamiya"])
+        mixed = self.matcher.candidate_pool(cfg, ["tamiya", "no-such-brand"])
+        self.assertEqual([e.uid for e in clean], [e.uid for e in mixed])
+        self.assertTrue(all(e.brand_key == "tamiya" for e in mixed))
+
+    def test_unknown_brand_key_falls_back_to_full_pool(self):
+        """全是未知键时按「无候选」处理，不悄悄放开成全库。
+
+        「不限品牌」只能用 ``[]`` 表达；点名了品牌却一个都不存在，说明配置坏了，
+        应当明确给出空结果，而不是把用户的品牌限制静默取消。
+        """
+        cfg = AppConfig()
+        self.assertEqual(self.matcher.candidate_pool(cfg, ["no-such-brand"]), [])
+
     def test_share_text_includes_component_amounts(self):
         """分享文本要与界面一致：多色配方要写出每支漆的 ml。"""
         from app.services.export_service import suggestions_to_share_text

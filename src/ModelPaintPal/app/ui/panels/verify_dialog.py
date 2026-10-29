@@ -14,8 +14,9 @@ from PySide6.QtWidgets import (
     QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
-from ..theme import Palette, font
+from ...core.delta_e import format_delta_e
 from ...services.verify_service import VerifyReport
+from ..theme import Palette, font
 
 __all__ = ["VerifyDialog"]
 
@@ -143,7 +144,7 @@ class VerifyDialog(QDialog):
             value.setFont(font(9))
             layout.addWidget(value)
         if hit.delta_e is not None:
-            gap = QLabel(f"ΔE {hit.delta_e:.2f}")
+            gap = QLabel(format_delta_e(hit.delta_e))
             gap.setObjectName("FaintLabel")
             gap.setFont(font(9))
             layout.addWidget(gap)

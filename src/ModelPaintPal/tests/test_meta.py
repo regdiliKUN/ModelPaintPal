@@ -83,6 +83,79 @@ class TestCodeHygiene(unittest.TestCase):
                     offenders.append(f"{path.relative_to(PROJECT_ROOT)}::{node.name} ({len(body)} 行)")
         self.assertEqual(offenders, [], f"函数过长，请拆分：{offenders}")
 
+    def test_delta_e_text_goes_through_formatter(self):
+        """「ΔE 2.96」这类文案必须走 ``format_delta_e``，不能各处手写位数。
+
+        同一条建议的 ΔE 会同时出现在卡片角标、状态栏、分享文本、导出表格里。
+        只要有一处手写 ``:.1f``，用户就会看到「卡片 2.96、分享文本 3.0」，
+        然后怀疑数据。本轮把散落的 12 处手写统一到 formatter，并把门槛设成 0。
+        """
+        offenders = []
+        pattern = re.compile(r'f"[^"]*ΔE \{')
+        for path, text in _sources():
+            if path.name == "delta_e.py":
+                continue          # 格式化实现本身就在这里
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if pattern.search(line):
+                    offenders.append(f"{path.relative_to(PROJECT_ROOT)}:{lineno}")
+        self.assertEqual(offenders, [], f"请改用 format_delta_e：{offenders}")
+
+    def test_broad_except_leaves_a_trace(self):
+        """捕获 ``Exception`` 的处理块必须留下痕迹（记日志或重新抛出）。
+
+        宽泛捕获本身是对的——抓屏、热键、剪贴板、字体子系统这些外部依赖抛什么
+        都有可能，不该把进程带崩。但「吞掉且不留痕」会让「某个功能悄悄不工作了」
+        变成无法排查的问题：用户只能说「放大镜有时候是空的」，日志里一个字都没有。
+        这里用「处理块内必须出现 ``logger.`` 或 ``raise``」做机械校验。
+        """
+        offenders = []
+        for path, text in _sources():
+            lines = text.splitlines()
+            for node in ast.walk(ast.parse(text)):
+                if not isinstance(node, ast.ExceptHandler):
+                    continue
+                caught = node.type
+                if caught is None:
+                    offenders.append(f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}（裸 except）")
+                    continue
+                name = getattr(caught, "id", None) or getattr(caught, "attr", None)
+                if name != "Exception":
+                    continue
+                end = node.end_lineno or node.lineno
+                body = "\n".join(lines[node.lineno - 1:end])
+                if "logger." not in body and "raise" not in body:
+                    offenders.append(f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}")
+        self.assertEqual(offenders, [], f"兜底异常没有留日志：{offenders}")
+
+    def test_installer_version_matches_package(self):
+        """安装脚本里的版本号必须与包版本一致。
+
+        `installer.iss` 停在 1.0.0 而包已经到 1.2.0 时，打出来的安装包文件名、
+        「添加/删除程序」里显示的版本、以及用户报障时说的版本号全是错的。
+        """
+        text = (PROJECT_ROOT / "installer.iss").read_text(encoding="utf-8")
+        match = re.search(r'#define\s+MyAppVersion\s+"([^"]+)"', text)
+        self.assertIsNotNone(match, "installer.iss 里找不到 MyAppVersion")
+        self.assertEqual(match.group(1), app.__version__)
+
+    def test_public_functions_are_annotated(self):
+        """公开函数必须有返回注解。
+
+        370 个公开函数里只剩 8 个没写，补齐之后把门槛设成 0：新加的公开函数
+        一旦漏注解，这里会失败。私有函数（``_`` 开头）不在此列——它们大多返回
+        元组或临时结构，强加注解只会变成噪声。
+        """
+        offenders = []
+        for path, text in _sources():
+            tree = ast.parse(text)
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if node.name.startswith("_") or node.returns is not None:
+                    continue
+                offenders.append(f"{path.relative_to(PROJECT_ROOT)}::{node.name}")
+        self.assertEqual(offenders, [], f"公开函数缺少返回注解：{offenders}")
+
     def test_core_layer_has_no_upward_imports(self):
         """依赖方向必须是 ui → services → data → core，core 不得反向依赖上层。"""
         offenders = []

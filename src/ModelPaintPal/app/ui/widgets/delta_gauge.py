@@ -20,7 +20,7 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ...core.color_models import lab_to_rgb, normalize_rgb, rgb_to_hex, rgb_to_lab
-from ...core.delta_e import DELTA_E_GRADES, grade_delta_e
+from ...core.delta_e import DELTA_E_GRADES, format_delta_e, grade_delta_e
 from ..paint import painter_on
 from ..theme import Palette, font
 
@@ -120,7 +120,7 @@ class DeltaGauge(QWidget):
 
         painter.setFont(font(8, bold=True))
         painter.setPen(marker)
-        label = f"ΔE {value:.2f}" + (" >" if value > _MAX_SHOWN else "")
+        label = format_delta_e(value) + (" >" if value > _MAX_SHOWN else "")
         text_w = painter.fontMetrics().horizontalAdvance(label) + 6
         text_x = min(max(0.0, x - text_w / 2), self.width() - text_w)
         painter.drawText(QRectF(text_x, _BAR_TOP - 20, text_w, 14), Qt.AlignCenter, label)

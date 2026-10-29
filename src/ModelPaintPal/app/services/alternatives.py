@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
-from ..core.delta_e import delta_e
+from ..core.delta_e import delta_e, format_delta_e, resolve_delta_e, sl_scale_max
 from ..data.paint_db import PaintDatabase, PaintEntry
 
 __all__ = ["Alternative", "find_alternatives", "STANDARD_PREFIXES"]
@@ -101,12 +101,15 @@ def find_alternatives(entry: PaintEntry,
     remaining = max(0, limit - len(results))
     if remaining:
         pool = db.by_brands(brand_scope) if brand_scope else db.entries
+        # 公式解析一次，避免在全库扫描里逐条重复做字符串处理
+        de_fn = resolve_delta_e(formula)
         for value, candidate in _nearest(entry, pool, seen, same_brand,
-                                         formula, tolerance, remaining):
+                                         de_fn, sl_scale_max(de_fn),
+                                         tolerance, remaining):
             seen.add(candidate.uid)
             results.append(Alternative(
                 paint=candidate,
-                reason=f"色差 ΔE {value:.1f}，跨品牌最接近",
+                reason=f"色差 {format_delta_e(value)}，跨品牌最接近",
                 delta_e=value,
                 evidence="nearest",
             ))
@@ -116,15 +119,28 @@ def find_alternatives(entry: PaintEntry,
 
 
 def _nearest(entry: PaintEntry, pool, seen: set, same_brand: bool,
-             formula: str, tolerance: float, limit: int) -> List[tuple]:
-    """跨品牌最近色的候选排序（证据强度低于「同标准色号」）。"""
+             de_fn, sl_max: float, tolerance: float, limit: int) -> List[tuple]:
+    """跨品牌最近色的候选排序（证据强度低于「同标准色号」）。
+
+    ``de_fn`` 是已解析好的色差函数（见 ``delta_e.resolve_delta_e``）——这个循环
+    按全库条数跑，逐次 ``delta_e(..., formula)`` 会重复做公式名字符串处理。
+
+    ``sl_max`` 是亮度权重 S_L 的上界。因为 ``ΔE ≥ |ΔL| / S_L``，亮度差已经超出
+    ``tolerance × S_L,max`` 的候选**必然**不合格，可以直接跳过、不算完整 ΔE。
+    容差 3.0 时这一条会滤掉全库绝大多数色号（|ΔL| 允许范围只有 ±5.2），
+    而它是严格下界，不会漏掉任何合格候选。
+    """
     distance: List[tuple] = []
+    lightness_span = tolerance * sl_max
+    reference_l = entry.lab[0]
     for candidate in pool:
         if candidate.uid in seen:
             continue
         if not same_brand and candidate.brand_key == entry.brand_key:
             continue
-        value = delta_e(entry.lab, candidate.lab, formula)
+        if abs(candidate.lab[0] - reference_l) > lightness_span:
+            continue
+        value = de_fn(entry.lab, candidate.lab)
         if value <= tolerance:
             distance.append((value, candidate))
     distance.sort(key=lambda item: item[0])

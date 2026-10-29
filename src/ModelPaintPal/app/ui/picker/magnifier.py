@@ -17,7 +17,10 @@ from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
+from ...core.logging_setup import get_logger
 from ..theme import Palette, font
+
+logger = get_logger(__name__)
 
 __all__ = ["MagnifierWindow"]
 
@@ -80,7 +83,8 @@ class MagnifierWindow(QWidget):
             data = image.tobytes("raw", "RGB")
             qimage = QImage(data, image.width, image.height, QImage.Format_RGB888)
             self._image = qimage.copy()  # 必须拷贝，PIL 缓冲区随后即失效
-        except Exception:  # pragma: no cover - 极端情况下静默降级
+        except Exception as exc:  # pragma: no cover - 极端情况下降级为纯色块
+            logger.debug("放大镜位图转换失败（降级为纯色块）: %s", exc)
             self._image = None
         self.update()
 

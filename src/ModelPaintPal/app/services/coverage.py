@@ -167,17 +167,16 @@ class CoverageEstimate:
         return " · ".join(parts)
 
 
-def estimate_coverage(inp: CoverageInput,
-                      proportions: Dict[str, float] | None = None,
-                      bottle_ml: float = 0.0) -> CoverageEstimate:
-    """估算用量。``proportions`` 为 {组分标识: 0-1 比例}，可为空。
+def _validated_copy(inp: "CoverageInput", proportions, bottle_ml: float) -> "CoverageInput":
+    """校验并复制输入，返回可安全改动的副本。
 
-    ``bottle_ml`` 给 0 时不计算瓶数（多品牌混合没有单一容量）。
+    拒绝非有限输入：NaN/inf 会被 max() 直接放行（Python 的 max 遇 NaN 返回 NaN），
+    一路乘进面积、稀释比，最终给出「NaN ml」却不触发任何报错——必须在第一现场挡住。
+    ``bottle_ml`` 是唯一漏网过的输入：它决定「约几瓶」，NaN 会让 bottles 变成 NaN
+    而不触发任何报错（NaN 参与的比较全为假，连 ``bottle_ml > 0`` 都拦不住它）。
     """
     if inp is None:
         raise ValueError("用量估算缺少输入 CoverageInput")
-    # 拒绝非有限输入：NaN/inf 会被 max() 直接放行（Python 的 max 遇 NaN 返回 NaN），
-    # 一路乘进面积、稀释比，最终给出「NaN ml」却不触发任何报错——必须在第一现场挡住。
     for name in ("area_m2", "thinner_ratio", "mix_ml_per_m2_per_coat", "waste_buffer", "coats",
                  "fixed_paint_loss_ml"):
         value = getattr(inp, name, None)
@@ -187,9 +186,37 @@ def estimate_coverage(inp: CoverageInput,
         for key, value in proportions.items():
             if not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"proportions[{key!r}] 必须是有限实数，收到 {value!r}")
+    if not isinstance(bottle_ml, (int, float)) or not math.isfinite(bottle_ml):
+        raise ValueError(f"bottle_ml 必须是有限实数，收到 {bottle_ml!r}")
     # 先拷贝再归一化，绝不修改调用方传入的 CoverageInput（避免隐藏的副作用：
-    # 之前 inp.normalized() 会就地修改原对象，共享同一实例时会导致诡异的二次调用结果漂移）。
-    cfg = CoverageInput(**asdict(inp)).normalized()
+    # 之前 inp.normalized() 会就地修改原对象，共享同一实例时会导致二次调用结果漂移）。
+    return CoverageInput(**asdict(inp)).normalized()
+
+
+def _coverage_notes(cfg: "CoverageInput") -> list:
+    """按本次参数生成提示语（只写和当前设置相关的，不摊无关说明）。"""
+    notes = ["用量为经验估算，原漆需求不随额外稀释比减少；请按个人喷笔校准"]
+    if cfg.fixed_paint_loss_ml:
+        notes.append(f"已另计固定原漆损耗 {cfg.fixed_paint_loss_ml:g} ml（不乘面积或层数）")
+    if cfg.surface == "raw_print":
+        notes.append("3D 打印件未上水补土，层纹会多吃约 30% 的漆，建议先喷一层水补土")
+    if cfg.thinner_ratio <= 0.0:
+        notes.append("未稀释：仅适合笔涂或预稀释漆（如 Vallejo Model Air、SMS）")
+    elif cfg.thinner_ratio >= 2.0:
+        notes.append("稀释度偏高，遮盖力会下降，需增加层数")
+    if cfg.application == "spray_can":
+        notes.append("喷罐损耗大，估算已按 1.6 倍计入")
+    return notes
+
+
+def estimate_coverage(inp: CoverageInput,
+                      proportions: Dict[str, float] | None = None,
+                      bottle_ml: float = 0.0) -> CoverageEstimate:
+    """估算用量。``proportions`` 为 {组分标识: 0-1 比例}，可为空。
+
+    ``bottle_ml`` 给 0 时不计算瓶数（多品牌混合没有单一容量）。
+    """
+    cfg = _validated_copy(inp, proportions, bottle_ml)
     application_factor = APPLICATION_FACTORS[cfg.application]
     surface_factor = SURFACE_FACTORS[cfg.surface]
 
@@ -208,18 +235,6 @@ def estimate_coverage(inp: CoverageInput,
                 for key, value in proportions.items()
             }
 
-    notes = ["用量为经验估算，原漆需求不随额外稀释比减少；请按个人喷笔校准"]
-    if cfg.fixed_paint_loss_ml:
-        notes.append(f"已另计固定原漆损耗 {cfg.fixed_paint_loss_ml:g} ml（不乘面积或层数）")
-    if cfg.surface == "raw_print":
-        notes.append("3D 打印件未上水补土，层纹会多吃约 30% 的漆，建议先喷一层水补土")
-    if cfg.thinner_ratio <= 0.0:
-        notes.append("未稀释：仅适合笔涂或预稀释漆（如 Vallejo Model Air、SMS）")
-    elif cfg.thinner_ratio >= 2.0:
-        notes.append("稀释度偏高，遮盖力会下降，需增加层数")
-    if cfg.application == "spray_can":
-        notes.append("喷罐损耗大，估算已按 1.6 倍计入")
-
     return CoverageEstimate(
         area_m2=cfg.area_m2,
         coats=cfg.coats,
@@ -228,7 +243,7 @@ def estimate_coverage(inp: CoverageInput,
         thinner_ml=round(thinner_ml, 3),
         bottles=round(paint_ml / bottle_ml, 2) if bottle_ml > 0 else 0.0,
         per_component_ml={k: round(v, 3) for k, v in per_component.items()},
-        notes=notes,
+        notes=_coverage_notes(cfg),
     )
 
 

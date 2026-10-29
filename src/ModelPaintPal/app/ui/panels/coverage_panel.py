@@ -225,7 +225,14 @@ class CoveragePanel(QFrame):
 
     # ------------------------------------------------------------------ 同步
     def sync_from_config(self) -> None:
+        """按配置回填控件；``_updating`` 用 try/finally 保证复位（同设置页）。"""
         self._updating = True
+        try:
+            self._apply_config_values()
+        finally:
+            self._updating = False
+
+    def _apply_config_values(self) -> None:
         self._area.setValue(round(self._config.area_m2 * 10000.0))
         self._coats.setValue(self._config.coats)
         self._thinner.setValue(self._config.thinner_ratio)
@@ -237,7 +244,6 @@ class CoveragePanel(QFrame):
         self._buffer.setValue(self._config.waste_buffer)
         self._fixed_loss.setValue(self._config.fixed_paint_loss_ml)
         self._auto_prethinned.setChecked(self._config.auto_prethinned)
-        self._updating = False
 
     def coverage_input(self) -> CoverageInput:
         return CoverageInput(

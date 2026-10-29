@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
+from ...core.delta_e import format_delta_e
 from ...services.paint_matcher import PaintSuggestion
 from ..presenters import build_swatches
 from ..theme import Palette, font
@@ -187,7 +188,7 @@ class SuggestionCard(QFrame):
 
     def _render_header(self, suggestion: PaintSuggestion) -> None:
         grade = suggestion.grade
-        self._badge.setText(f"ΔE {suggestion.delta_e:.2f}")
+        self._badge.setText(format_delta_e(suggestion.delta_e))
         self._badge.setStyleSheet(
             f"background-color: {grade.color}; color: #10131A; "
             f"border-radius: 9px; padding: 3px 9px;"

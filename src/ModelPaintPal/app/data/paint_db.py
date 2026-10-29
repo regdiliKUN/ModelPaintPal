@@ -69,7 +69,7 @@ class PaintEntry:
         return rgb_to_hex(self.rgb)
 
     @property
-    def source(self):
+    def source(self) -> Optional["_sources.Source"]:
         """这条色号引用的来源记录；未标注时返回 None。"""
         return _sources.get_source(self.src_ref)
 
@@ -350,11 +350,19 @@ def reload_database() -> PaintDatabase:
 
 
 def calibrate(uid: str, hex_value: str) -> bool:
-    """写入用户校准值（覆盖随包数据的近似色值）。"""
+    """写入用户校准值（覆盖随包数据的近似色值）。
+
+    只接受**库里真实存在**的色号：此前对任意 uid 都会写成功，于是在设置页留下一条
+    「X-99 → #FF0000」的幽灵校准记录——它不对应任何色号、不影响任何结果，而单条
+    删除是按色号列表走的，用户只能「清空全部校准」才能把它弄掉。
+    """
     try:
         hex_to_rgb(hex_value)
     except ValueError as exc:
         logger.error("校准失败: %s", exc)
+        return False
+    if get_database().get(uid) is None:
+        logger.warning("校准失败：色号 %s 不在当前色号库中", uid)
         return False
     overrides = _overrides_store.load() or {}
     # 记下校准时间：它是这条色号新的采集时间，过没过期要靠它判断。
@@ -384,6 +392,15 @@ def reset_calibration(uid: str = "") -> bool:
 
 
 def calibration_map() -> Dict[str, str]:
+    """当前生效的校准表（只含库里真实存在的色号）。
+
+    文件里可能残留历史遗留的无效 uid（例如旧版本写进去的、或色号库调整后消失的），
+    界面不该把它们列成「已校准」——那不是用户能理解的记录。
+    """
     overrides = _overrides_store.load() or {}
-    return {key: str(value.get("hex", "")) for key, value in overrides.items()
-            if isinstance(value, dict)}
+    database = get_database()
+    return {
+        key: str(value.get("hex", ""))
+        for key, value in overrides.items()
+        if isinstance(value, dict) and database.get(key) is not None
+    }

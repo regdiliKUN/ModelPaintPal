@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Callable, List, Optional
 
 from .logging_setup import get_logger
-from .sample_record import SampleRecord, record_from_dict
+from .sample_record import SampleRecord, record_or_none
 from .storage import CollectionStore
 
 logger = get_logger(__name__)
@@ -34,10 +34,12 @@ class HistoryStore:
     def all(self) -> List[SampleRecord]:
         records: List[SampleRecord] = []
         for item in self._store.load():
-            try:
-                records.append(record_from_dict(item))
-            except Exception:  # 单条脏数据不应拖累整段历史加载
+            # 还原不出颜色的记录直接丢掉：显示成纯黑色块比丢掉更糟
+            record = record_or_none(item)
+            if record is None:
                 logger.warning("忽略一条无法解析的历史记录: %r", item)
+                continue
+            records.append(record)
         return records
 
     def recent(self, count: int = 24) -> List[SampleRecord]:
@@ -75,7 +77,9 @@ class HistoryStore:
         changed = False
         for item in items:
             if item.get("uid") == uid:
-                record = record_from_dict(item)
+                record = record_or_none(item)
+                if record is None:
+                    continue
                 mutator(record)
                 item.update(record.to_dict())
                 changed = True

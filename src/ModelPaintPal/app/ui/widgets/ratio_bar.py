@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
@@ -50,7 +50,7 @@ class RatioBar(QWidget):
         self._segments = []
         self.update()
 
-    def sizeHint(self):  # noqa: N802
+    def sizeHint(self) -> QSize:  # noqa: N802
         return self.minimumSizeHint().__class__(240, _BAR_HEIGHT)
 
     def paintEvent(self, event) -> None:  # noqa: N802

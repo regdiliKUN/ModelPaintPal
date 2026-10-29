@@ -7,9 +7,9 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
-from .color_models import normalize_rgb, rgb_to_hex
+from .color_models import hex_to_rgb, normalize_rgb, rgb_to_hex
 
-__all__ = ["SampleRecord", "record_from_rgb", "record_from_dict"]
+__all__ = ["SampleRecord", "record_from_rgb", "record_from_dict", "record_or_none"]
 
 
 class SampleRecord:
@@ -107,3 +107,31 @@ def _safe_rgb(value: Any) -> List[int]:
         return list(normalize_rgb(value[:3]))
     except (TypeError, ValueError):
         return [0, 0, 0]
+
+
+def record_or_none(data: Any) -> Optional[SampleRecord]:
+    """解析一条历史/收藏记录；**还原不出颜色**时返回 ``None``。
+
+    ``record_from_dict`` 刻意宽容（解析失败回落纯黑），那是给「必须返回一条记录」
+    的调用方用的。但列表类 UI 不该这么干：一条损坏的记录会显示成一块**纯黑色块**，
+    用户会以为自己取过这个颜色，而且它看着和真实记录一模一样，删都不知道删哪条。
+
+    这里先确认「原始数据里至少有一个能解析的颜色」（rgb 或 hex），再交给宽容解析。
+    """
+    if not isinstance(data, dict):
+        return None
+    usable = False
+    raw_rgb = data.get("rgb")
+    if isinstance(raw_rgb, (list, tuple)) and len(raw_rgb) >= 3:
+        try:
+            normalize_rgb(list(raw_rgb)[:3])
+            usable = True
+        except (TypeError, ValueError):
+            pass
+    if not usable and isinstance(data.get("hex"), str):
+        try:
+            hex_to_rgb(data["hex"])
+            usable = True
+        except ValueError:
+            pass
+    return record_from_dict(data) if usable else None

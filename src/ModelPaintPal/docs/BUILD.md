@@ -64,7 +64,8 @@ dist/
 ISCC.exe installer.iss
 ```
 
-产物：`dist\Installer\ModelPaintPal-Setup-1.0.0.exe`，支持：
+产物：`dist\Installer\ModelPaintPal-Setup-1.2.0.exe`（版本号取自 `installer.iss` 的
+`MyAppVersion`，须与 `app/__init__.py` 的 `__version__` 一致），支持：
 - 中英文安装界面、开始菜单快捷方式、桌面图标
 - 安装后自动写入 `%APPDATA%`（不含 `portable.marker`，即安装模式）
 - 卸载清理
@@ -101,5 +102,10 @@ python -m pyflakes app scripts tests run.py
 python -m unittest discover -s tests
 python scripts/smoke_test.py
 python scripts/check_paint_db.py
+python scripts/check_regression.py    # 配方结果指纹：确认「算出来的还是同一个东西」
+python scripts/bench.py               # 性能锚点（性能优化前后必跑）
 python scripts/build.py
 ```
+
+`check_regression.py` 与 `bench.py` 是一对：前者保证**结果不变**，后者保证**速度变快**。
+只跑其中一个都会得出错误结论——「快了但配方换了」和「结果一样但慢了」都不算优化。

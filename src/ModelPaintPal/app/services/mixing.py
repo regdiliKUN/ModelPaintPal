@@ -20,6 +20,7 @@ from ..core.color_models import linear_to_rgb, normalize_rgb, rgb_to_linear
 
 __all__ = [
     "mix_colors", "mix_lab_approx", "MIXING_MODELS", "describe_model",
+    "short_model_name",
     "_mix_linears", "_profile_of", "_mix_profiles",
 ]
 
@@ -155,4 +156,16 @@ def describe_model(model: str) -> str:
     return {
         "kubelka_munk": "Kubelka-Munk 三通道近似（默认，需试喷验证）",
         "linear_rgb": "线性光平均（数字颜色对比，非实漆预测）",
+    }.get(model, model)
+
+
+def short_model_name(model: str) -> str:
+    """模型短名，给「一行内要写清楚」的场合用（剪贴板标题、导出表头）。
+
+    ``describe_model`` 是给设置页解释用的长句，塞进标题会套出一层括号；
+    两处口径必须同源，否则同一个模型在设置页和导出里叫两个名字。
+    """
+    return {
+        "kubelka_munk": "Kubelka-Munk 减色模型",
+        "linear_rgb": "线性光平均",
     }.get(model, model)

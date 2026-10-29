@@ -51,8 +51,8 @@ def _install_excepthook() -> None:
                 None, "程序异常",
                 f"发生了未处理的异常：\n{exc_value}\n\n详细信息已写入日志。",
             )
-        except Exception:  # pragma: no cover
-            pass
+        except Exception as exc:  # pragma: no cover - 连对话框都弹不出来时只能记日志
+            logger.debug("异常对话框显示失败: %s", exc)
         sys.__excepthook__(exc_type, exc_value, exc_tb)
 
     sys.excepthook = _hook

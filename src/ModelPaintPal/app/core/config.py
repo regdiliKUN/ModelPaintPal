@@ -88,6 +88,13 @@ class AppConfig:
     max_recipe_components: int = 3
     drop_total: int = 20                # 换算滴数时的基准总滴数
 
+    # ---------------- 配色方案 ----------------
+    # 取值见 services/scheme_engine.SCHEME_ORDER。这里存字符串而不是枚举，
+    # 是为了让 core 层不依赖 services（依赖方向只能是 services → core）。
+    # 未知值由面板忽略并保持当前选择，不会把界面搞崩。
+    scheme_type: str = "basic"
+    scheme_param: int = 0              # 仅邻近色/单色系有意义（色数/层次数 3–7）
+
     # ---------------- 用量估算 ----------------
     area_m2: float = 0.05               # 默认按 1/35 战车级别的展开面积
     coats: int = 2
@@ -163,7 +170,10 @@ class AppConfig:
             self.delta_e_formula = "CIEDE2000"
         self.match_tolerance = max(0.2, min(20.0, float(self.match_tolerance)))
         self.max_suggestions = max(1, min(20, int(self.max_suggestions)))
-        self.max_recipe_components = max(1, min(4, int(self.max_recipe_components)))
+        # 上限必须与引擎能力一致：`recipe_engine` 只搜索单色/双色/三色，
+        # 设置页的控件范围也是 1–3。此前这里允许 4，手改配置成 4 的用户会得到一个
+        # 「看起来设了 4、实际最多 3」的静默失效。
+        self.max_recipe_components = max(1, min(3, int(self.max_recipe_components)))
         self.drop_total = max(4, min(200, int(self.drop_total)))
         self.area_m2 = max(0.0005, min(50.0, float(self.area_m2)))
         self.coats = max(1, min(8, int(self.coats)))
@@ -185,6 +195,8 @@ class AppConfig:
             self.preferred_brands = ["tamiya"]
         if not isinstance(self.mix_brands, list):
             self.mix_brands = ["tamiya"]
+        self.scheme_type = str(self.scheme_type or "basic")
+        self.scheme_param = max(0, min(7, int(self.scheme_param)))
         return self
 
 

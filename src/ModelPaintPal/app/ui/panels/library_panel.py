@@ -34,14 +34,11 @@ class _Chip(QFrame):
 
     def __init__(self, record: SampleRecord, show_favorite: bool = True, parent=None) -> None:
         super().__init__(parent)
-        self._record = record
+        # 先留空：set_record 里有「同一条记录就跳过」的短路，先赋值会让它直接返回、
+        # 标签永远是空的
+        self._record = None
         self.setObjectName("CardAlt")
-        r, g, b = record.rgb
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(
-            f"QFrame#CardAlt {{ background-color: rgb({r},{g},{b}); "
-            f"border: 1px solid {Palette.border}; border-radius: 8px; }}"
-        )
         # 固定高度：网格只有 1–2 条记录时，行会被拉伸成 200px 高的大方块
         self.setFixedHeight(_CHIP_HEIGHT)
         self.setMinimumWidth(_CHIP_MIN_WIDTH)
@@ -52,19 +49,15 @@ class _Chip(QFrame):
 
         top = QHBoxLayout()
         top.setSpacing(4)
-        # 没有自定义名字时标题就是 HEX，此时副标题不再重复一遍 HEX
-        has_name = bool(record.name)
-        title_text = record.name if has_name else record.hex
-        name = QLabel(title_text)
-        name.setFont(font(9, bold=True, mono=not has_name))
-        name.setStyleSheet("color: %s; background: transparent;" % _text_color(record.rgb))
-        top.addWidget(name, 1)
+        self._name_label = QLabel("")
+        top.addWidget(self._name_label, 1)
 
         if show_favorite:
             fav = QPushButton("★")
             fav.setObjectName("IconButton")
             fav.setToolTip("加入收藏夹")
             fav.setFixedSize(22, 20)
+            # 引用 self._record 而不是捕获当前值：色块会被复用，记录会换
             fav.clicked.connect(lambda: self.favoriteRequested.emit(self._record))
             top.addWidget(fav)
 
@@ -76,12 +69,36 @@ class _Chip(QFrame):
         top.addWidget(close)
         layout.addLayout(top)
 
-        meta_text = f"{record.hex} · {record.time_text}" if has_name else record.time_text
-        meta = QLabel(meta_text)
-        meta.setFont(font(8, mono=True))
-        meta.setStyleSheet("color: %s; background: transparent;" % _text_color(record.rgb))
-        layout.addWidget(meta)
+        self._meta_label = QLabel("")
+        layout.addWidget(self._meta_label)
         layout.addStretch(1)
+        self.set_record(record)
+
+    def set_record(self, record) -> None:
+        """换一条记录（复用色块，不重建控件）。
+
+        每次取色都会刷新历史网格；原来是「全部销毁 + 全部重建」，60 条记录要
+        33 ms，而这一步就在主线程上、紧跟在取色之后。复用之后只剩改文字和背景色。
+        """
+        if self._record is record:
+            return      # 同一条记录（收藏夹没变时就是这种情况）不必重新刷样式
+        self._record = record
+        r, g, b = record.rgb
+        self.setStyleSheet(
+            f"QFrame#CardAlt {{ background-color: rgb({r},{g},{b}); "
+            f"border: 1px solid {Palette.border}; border-radius: 8px; }}"
+        )
+        # 没有自定义名字时标题就是 HEX，此时副标题不再重复一遍 HEX
+        has_name = bool(record.name)
+        self._name_label.setText(record.name if has_name else record.hex)
+        self._name_label.setFont(font(9, bold=True, mono=not has_name))
+        self._name_label.setStyleSheet(
+            "color: %s; background: transparent;" % _text_color(record.rgb))
+        self._meta_label.setText(
+            f"{record.hex} · {record.time_text}" if has_name else record.time_text)
+        self._meta_label.setFont(font(8, mono=True))
+        self._meta_label.setStyleSheet(
+            "color: %s; background: transparent;" % _text_color(record.rgb))
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         self.selected.emit(self._record)
@@ -105,6 +122,7 @@ class ColorGrid(QFrame):
         super().__init__(parent)
         self._show_favorite = show_favorite
         self._records: List[SampleRecord] = []
+        self._chips: List["_Chip"] = []      # 色块池：复用而不是每次重建
         self._empty_text = ""
         self._columns = 0
         self._scroll = QScrollArea(self)
@@ -140,7 +158,7 @@ class ColorGrid(QFrame):
         return max(1, min(_MAX_COLUMNS, int(per_row)))
 
     def _rebuild(self) -> None:
-        self._clear()
+        self._clear_empty()
         if not self._records:
             # 空状态自带"开始吸色"按钮：让用户就地完成下一步，而不是回左栏找入口
             self._empty = EmptyState(
@@ -154,24 +172,33 @@ class ColorGrid(QFrame):
             return
         self._scroll.setVisible(True)
         self._columns = self._columns_for_width(self.width())
+        self._ensure_chips(len(self._records))
+        # 先整体移出布局（不销毁），再按新的列数摆位——列数会随窗口宽度变
+        while self._grid.count():
+            self._grid.takeAt(0)
         for index, record in enumerate(self._records):
-            chip = _Chip(record, self._show_favorite, self._container)
-            chip.selected.connect(self.colorSelected.emit)
-            chip.removeRequested.connect(self.removeRequested.emit)
-            chip.favoriteRequested.connect(self.favoriteRequested.emit)
+            chip = self._chips[index]
+            chip.set_record(record)
+            chip.setVisible(True)
             self._grid.addWidget(chip, index // self._columns, index % self._columns)
+        for chip in self._chips[len(self._records):]:
+            chip.setVisible(False)
         rows = (len(self._records) + self._columns - 1) // self._columns
         # 末尾留一行弹性空间，避免行高被拉满
         self._grid.setRowStretch(rows, 1)
         self._grid.setColumnStretch(self._columns, 1)
 
-    def _clear(self) -> None:
-        while self._grid.count():
-            child = self._grid.takeAt(0)
-            widget = child.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+    def _ensure_chips(self, count: int) -> None:
+        """把色块池扩到 ``count`` 个（已有的不重建）。"""
+        while len(self._chips) < count:
+            chip = _Chip(self._records[len(self._chips)], self._show_favorite, self._container)
+            chip.selected.connect(self.colorSelected.emit)
+            chip.removeRequested.connect(self.removeRequested.emit)
+            chip.favoriteRequested.connect(self.favoriteRequested.emit)
+            self._chips.append(chip)
+
+    def _clear_empty(self) -> None:
+        """只清空状态提示；色块是复用池，不销毁。"""
         if self._empty is not None:
             self.layout().removeWidget(self._empty)
             self._empty.setParent(None)

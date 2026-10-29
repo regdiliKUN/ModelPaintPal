@@ -37,3 +37,45 @@ class TestLogging(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class StdStreamFallbackTest(unittest.TestCase):
+    """窗口模式（sys.stderr is None）下，非 logging 的输出也要能落盘。
+
+    Qt 槽函数里的异常走 PyErr_Print() 直接写 stderr，不经过 sys.excepthook；
+    打包成 --windowed 后 stderr 是 None，这类错误会彻底消失。本轮就踩到一次：
+    槽函数里控件名拼错，热键设置静默失效，日志里什么都没有。
+    """
+
+    def test_none_streams_are_redirected_to_file(self):
+        import tempfile
+        from pathlib import Path
+
+        from app.core.logging_setup import ensure_std_streams
+
+        original_out, original_err = sys.stdout, sys.stderr
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                sys.stdout = None
+                sys.stderr = None
+                replaced = ensure_std_streams(Path(tmp))
+                self.assertTrue(replaced)
+                self.assertIsNotNone(sys.stderr)
+                print("来自槽函数的 traceback", file=sys.stderr)
+                sys.stderr.flush()
+                text = (Path(tmp) / "stderr.log").read_text(encoding="utf-8")
+                self.assertIn("来自槽函数的 traceback", text)
+            finally:
+                sys.stdout, sys.stderr = original_out, original_err
+
+    def test_healthy_streams_are_left_alone(self):
+        import tempfile
+        from pathlib import Path
+
+        from app.core.logging_setup import ensure_std_streams
+
+        with tempfile.TemporaryDirectory() as tmp:
+            before = sys.stderr
+            self.assertFalse(ensure_std_streams(Path(tmp)))
+            self.assertIs(sys.stderr, before)
+            self.assertFalse((Path(tmp) / "stderr.log").exists())

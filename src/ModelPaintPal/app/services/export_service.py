@@ -12,9 +12,14 @@ import json
 from typing import List, Sequence
 
 from ..core.color_models import rgb_to_hex
+from ..core.delta_e import format_delta_e
+from ..core.logging_setup import get_logger
 from .alternatives import Alternative
+from .mixing import short_model_name
 from .paint_matcher import PaintSuggestion
 from .recipe_engine import Recipe, RecipeComponent
+
+logger = get_logger(__name__)
 
 __all__ = [
     "recipe_to_text",
@@ -26,6 +31,22 @@ __all__ = [
     "suggestions_to_share_text",
     "alternatives_to_text",
 ]
+
+
+def _md_cell(text: str) -> str:
+    """把任意文本塞进 Markdown 表格单元格。
+
+    竖线会把一行拆成两列、换行会把一行拆成两行——两者都会让整张表错位，
+    而且错位是**静默**的：表格照样渲染，只是列对不上。当前色号库里没有这种
+    字符，但这是数据，不是代码约束；导出是拿去别处用的，转义一次更省心。
+    """
+    return (str(text).replace("\\", "\\\\").replace("|", "\\|")
+            .replace("\r\n", "<br>").replace("\n", "<br>").replace("\r", "<br>"))
+
+
+def _one_line(text: str) -> str:
+    """压成一行（用于列表项、分享文本这类不能有换行的位置）。"""
+    return " ".join(str(text).split())
 
 
 def _component_lines(recipe: Recipe) -> List[str]:
@@ -41,7 +62,8 @@ def _component_lines(recipe: Recipe) -> List[str]:
 
 
 def recipe_to_text(recipe: Recipe) -> str:
-    lines = [f"调配方案（{recipe.model} / ΔE{recipe.formula} = {recipe.delta_e:.2f}）"]
+    lines = [f"调配方案（{short_model_name(recipe.model)} · "
+             f"{format_delta_e(recipe.delta_e)} / {recipe.formula}）"]
     lines.append(f"混合色：{recipe.mixed_hex}")
     lines.append("配比：" + recipe.drops_text() + " 滴")
     lines.extend(_component_lines(recipe))
@@ -52,8 +74,8 @@ def recipe_to_markdown(recipe: Recipe) -> str:
     rows = ["| 品牌 | 色号 | 名称 | 滴数 | 百分比 |", "| --- | --- | --- | --- | --- |"]
     for comp in recipe.components:
         rows.append(
-            f"| {comp.paint.brand_label} | {comp.paint.code} | {comp.paint.name} "
-            f"| {comp.drops} | {comp.percent_label} |"
+            f"| {_md_cell(comp.paint.brand_label)} | {_md_cell(comp.paint.code)} "
+            f"| {_md_cell(comp.paint.name)} | {comp.drops} | {comp.percent_label} |"
         )
     return "\n".join(rows)
 
@@ -82,7 +104,8 @@ def _provenance_lines(suggestion: PaintSuggestion) -> List[str]:
 
 
 def suggestion_to_markdown(suggestion: PaintSuggestion, target_hex: str = "") -> str:
-    head = f"### 方案 {suggestion.rank}：ΔE {suggestion.delta_e:.2f}（{suggestion.grade.label}）"
+    head = (f"### 方案 {suggestion.rank}：{format_delta_e(suggestion.delta_e)}"
+            f"（{suggestion.grade.label}）")
     if target_hex:
         head += f"  目标色 {target_hex}"
     body = [
@@ -100,11 +123,11 @@ def suggestion_to_markdown(suggestion: PaintSuggestion, target_hex: str = "") ->
     ]
     if suggestion.notes:
         body.append("")
-        body.extend(f"- 提示：{note}" for note in suggestion.notes)
+        body.extend(f"- 提示：{_one_line(note)}" for note in suggestion.notes)
     lines = _provenance_lines(suggestion)
     if lines:
         body.append("")
-        body.append("- 来源：" + "；".join(lines))
+        body.append("- 来源：" + _one_line("；".join(lines)))
     return "\n".join(body)
 
 
@@ -203,6 +226,21 @@ _TABLE_HEADER = [
 ]
 
 
+def _confidence_text(item: "PaintSuggestion") -> str:
+    """导出用的置信度单元格。
+
+    这里原本是一个 ``f"{prov and prov.confidence:.2f}" if prov else ""`` 的条件
+    表达式：既难读，又会在「有 provenance 但 confidence 不是数字」时把
+    ``TypeError`` 抛到导出流程里——用户点「导出 CSV」直接失败。缺失/异常一律
+    输出空串，让表格列数保持稳定。
+    """
+    prov = getattr(item, "provenance", None)
+    confidence = getattr(prov, "confidence", None)
+    if not isinstance(confidence, (int, float)):
+        return ""
+    return f"{float(confidence):.2f}"
+
+
 def _suggestion_row(item: "PaintSuggestion", target_hex: str) -> list:
     """把一条建议扁平化成一行字段（CSV 与 TSV 共用，保证两者列义完全一致）。"""
     recipe = item.recipe
@@ -222,8 +260,7 @@ def _suggestion_row(item: "PaintSuggestion", target_hex: str) -> list:
         f"{item.coverage.bottles:.2f}",
         alternatives_to_text(item.alternatives),
         " | ".join(item.notes),
-        f"{getattr(item, 'provenance', None) and item.provenance.confidence:.2f}"
-        if getattr(item, "provenance", None) else "",
+        _confidence_text(item),
         " ".join(_provenance_lines(item)) or "—",
     ]
 
@@ -281,15 +318,15 @@ def suggestions_to_share_text(suggestions: Sequence[PaintSuggestion],
         recipe = item.recipe
         lines.append("")
         if item.is_direct:
-            lines.append(f"方案 {item.rank}｜直接使用｜ΔE {item.delta_e:.1f}")
+            lines.append(f"方案 {item.rank}｜直接使用｜{format_delta_e(item.delta_e)}")
         else:
-            lines.append(f"方案 {item.rank}｜ΔE {item.delta_e:.1f}（{item.grade.label}）")
+            lines.append(f"方案 {item.rank}｜{format_delta_e(item.delta_e)}（{item.grade.label}）")
         for comp in recipe.components:
             amount = item.coverage.per_component_ml.get(comp.paint.uid)
             tail = f" ≈{amount:.1f}ml" if amount else ""
             lines.append(
-                f"  · {comp.paint.brand_label} {comp.paint.code} {comp.paint.name} "
-                f"{comp.drops}滴（{comp.percent_label}）{tail}"
+                f"  · {_one_line(comp.paint.brand_label)} {_one_line(comp.paint.code)} "
+                f"{_one_line(comp.paint.name)} {comp.drops}滴（{comp.percent_label}）{tail}"
             )
         lines.append(f"  混合后 {recipe.mixed_hex}｜预估 {item.coverage.mix_ml:.2f}ml 混合漆")
         if item.alternatives:
@@ -315,5 +352,6 @@ def copy_to_clipboard(text: str) -> bool:
             return False
         app.clipboard().setText(text)
         return True
-    except Exception:  # pragma: no cover
+    except Exception as exc:  # pragma: no cover - 剪贴板不可用（远程桌面/权限）
+        logger.debug("写入剪贴板失败: %s", exc)
         return False

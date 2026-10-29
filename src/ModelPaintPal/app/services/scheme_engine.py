@@ -376,6 +376,10 @@ def compute_base_mix(target_rgb: Sequence[int],
         matcher = PaintMatcher(get_database())
     if total_drops is None:
         total_drops = int(getattr(config, "drop_total", 20) or 20)
+    # 每瓶基础漆至少要 1 滴，所以总滴数不可能少于瓶数；不在这里对齐的话，
+    # 传 total_drops=0 会得到「总滴数 0」而各组分实际是 1+1+1+1+1 滴——
+    # 界面上比例条的标题和段内数字互相打架。
+    total_drops = max(len(_BASE_PAINTS), int(total_drops))
 
     target_ks = _srgb_to_ks(target)
     base_ks = [_srgb_to_ks(rgb) for _, rgb in _BASE_PAINTS]   # 5 个 (r,g,b)

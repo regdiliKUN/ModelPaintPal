@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from ..core.color_models import ColorSample
 from ..core.config import AppConfig, load_config, save_config
-from ..core.delta_e import grade_delta_e
+from ..core.delta_e import format_delta_e, grade_delta_e
 from ..core.favorites_store import FavoritesStore
 from ..core.history_store import HistoryStore
 from ..core.hotkeys import HotkeyManager
@@ -29,7 +29,7 @@ from ..data.paint_db import calibrate, get_database
 from ..services.export_service import (
     copy_to_clipboard, recipe_to_text, suggestion_to_markdown, suggestions_to_json,
 )
-from ..services.async_suggest import submit_mix, submit_suggest
+from ..services.async_suggest import submit_mix, submit_plan, submit_suggest
 from ..services.async_verify import submit_verify
 from ..services.paint_matcher import PaintMatcher, summarize
 from ..services.scheme_engine import MixRecipe
@@ -39,11 +39,13 @@ from .panels.verify_dialog import VerifyDialog
 from .panels.library_panel import LibraryPanel
 from .panels.pick_panel import PickPanel
 from .panels.scheme_panel import SCHEME_TAB_TITLE, SchemePanel
+from .panels.scheme_plan_panel import PLAN_TAB_TITLE, SchemePlanPanel
 from .panels.settings_panel import SettingsPanel
 from .panels.suggest_panel import SuggestPanel
 from .panels.visualize_panel import VisualizePanel
 from .picker.picker_controller import PickerController
 from .theme import Palette, stylesheet
+from . import actions
 from .onboarding import DEFAULT_STEPS, OnboardingOverlay, OnboardingStep
 from .widgets.toast import show_toast
 
@@ -63,6 +65,9 @@ _SOURCE_TUNE_RESET = "tune_reset"
 # 参数面板防抖：拖动 SpinBox 一次会触发几十次 valueChanged，
 # 每次都同步重算（约 140 ms）会让界面直接卡住。
 _COMPUTE_DEBOUNCE_MS = 180
+# 配置落盘去抖：save_config 走原子写 + fsync（实测 3.8 ms/次）。用量参数页每拖一格
+# 都会触发 valueChanged，50 格就是 190 ms 的主线程卡顿——而且这些中间值没人要。
+_SAVE_DEBOUNCE_MS = 500
 
 
 class MainWindow(QMainWindow):
@@ -85,6 +90,9 @@ class MainWindow(QMainWindow):
         # 基础配色（五瓶基础漆调配）状态
         self._mix_recipe: Optional[MixRecipe] = None
         self._scheme_token: int = 0
+        # 配色方案（色环方案 → 真实漆）状态
+        self._plan_token: int = 0
+        self._plan_stops: list = []
         # 基础漆统一到的品牌；空列表 = 混搭（各瓶可来自不同品牌）
         self._mix_brands: List[str] = list(getattr(self._config, "mix_brands", []) or [])
         self._total_drops: int = int(getattr(self._config, "drop_total", 20) or 20)
@@ -96,6 +104,11 @@ class MainWindow(QMainWindow):
         self._compute_timer.setSingleShot(True)
         self._compute_timer.setInterval(_COMPUTE_DEBOUNCE_MS)
         self._compute_timer.timeout.connect(self._compute_async)
+
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(_SAVE_DEBOUNCE_MS)
+        self._save_timer.timeout.connect(self._flush_config)
 
         from .. import __version__
 
@@ -144,6 +157,7 @@ class MainWindow(QMainWindow):
         self._onboarding = OnboardingOverlay(central, self._build_onboarding_steps())
         self._suggest_panel.show_empty()
         self._scheme_panel.show_empty()
+        self._plan_panel.show_empty()
 
     def _build_left_column(self, parent: QWidget) -> QScrollArea:
         """左列（放在滚动区里：窗口偏矮时不会把数值行压成裁切）。"""
@@ -176,11 +190,14 @@ class MainWindow(QMainWindow):
         self._scheme_panel = SchemePanel(self._tabs)
         self._scheme_panel.set_total_drops(self._total_drops)
         self._scheme_panel.set_brand(self._mix_brands)
+        self._plan_panel = SchemePlanPanel(self._tabs)
+        self._plan_panel.set_scheme(self._config.scheme_type, self._config.scheme_param)
         self._coverage_panel = CoveragePanel(self._config, self._tabs)
         self._settings_panel = SettingsPanel(self._config, self._tabs)
         self._tabs.addTab(self._suggest_panel, "配色建议")
         self._tabs.addTab(self._visualize_panel, "色卡对比")
         self._tabs.addTab(self._scheme_panel, SCHEME_TAB_TITLE)
+        self._tabs.addTab(self._plan_panel, PLAN_TAB_TITLE)
         self._tabs.addTab(self._coverage_panel, "用量参数")
         self._tabs.addTab(self._settings_panel, "设置")
         right_layout.addWidget(self._tabs, 1)
@@ -193,16 +210,16 @@ class MainWindow(QMainWindow):
 
         file_menu = menu.addMenu("文件")
         export_json = file_menu.addAction("导出建议为 JSON…")
-        export_json.triggered.connect(self._export_json)
+        export_json.triggered.connect(lambda: actions.export_suggestions(self, "json"))
         export_md = file_menu.addAction("导出建议为 Markdown…")
-        export_md.triggered.connect(self._export_markdown)
+        export_md.triggered.connect(lambda: actions.export_suggestions(self, "markdown"))
         export_csv = file_menu.addAction("导出建议为 CSV…")
-        export_csv.triggered.connect(self._export_csv)
+        export_csv.triggered.connect(lambda: actions.export_suggestions(self, "csv"))
         file_menu.addSeparator()
         share_action = file_menu.addAction("复制分享文本")
         # 注意：Ctrl+Shift+C 是全局「复制色值」热键，这里必须避开，否则两个动作抢同一个组合键
         share_action.setShortcut("Ctrl+Alt+C")
-        share_action.triggered.connect(self._copy_share_text)
+        share_action.triggered.connect(lambda: actions.copy_share_text(self))
         file_menu.addSeparator()
         quit_action = file_menu.addAction("退出")
         quit_action.triggered.connect(self.close)
@@ -219,16 +236,9 @@ class MainWindow(QMainWindow):
         guide = help_menu.addAction("新手引导")
         guide.triggered.connect(self._start_onboarding)
         shortcut = help_menu.addAction("创建桌面快捷方式")
-        shortcut.triggered.connect(self._create_desktop_shortcut)
+        shortcut.triggered.connect(lambda: actions.create_desktop_shortcut(self))
         about = help_menu.addAction("关于")
-        about.triggered.connect(self._show_about)
-
-    def _create_desktop_shortcut(self) -> None:
-        from ..core.shortcut import ensure_desktop_shortcut
-
-        result = ensure_desktop_shortcut()
-        show_toast(self, "桌面快捷方式已就绪" if result else
-                   "创建未成功，请查看日志；也可为 ModelPaintPal.exe 手动创建快捷方式")
+        about.triggered.connect(actions.show_about)
 
     def _build_header(self) -> QFrame:
         header = QFrame(self)
@@ -241,10 +251,8 @@ class MainWindow(QMainWindow):
         title_box.setSpacing(2)
         title = QLabel("3D 打印模型涂装配色助手")
         title.setObjectName("TitleLabel")
-        title.setObjectName("SectionLabel")
         subtitle = QLabel("吸色 → 找漆 → 给配比 → 估用量 · 数据仅供配漆参考，正式喷涂请先试喷")
         subtitle.setObjectName("SubTitleLabel")
-        subtitle.setObjectName("DimLabel")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         row.addLayout(title_box, 1)
@@ -312,6 +320,10 @@ class MainWindow(QMainWindow):
         self._scheme_panel.mixRequested.connect(self._on_mix_requested)
         self._scheme_panel.brandChanged.connect(self._on_mix_brand_changed)
 
+        # 配色方案
+        self._plan_panel.pickRequested.connect(self._start_picking)
+        self._plan_panel.planRequested.connect(self._on_plan_requested)
+
         # 用量参数
         self._coverage_panel.configChanged.connect(self._on_coverage_changed)
 
@@ -320,6 +332,8 @@ class MainWindow(QMainWindow):
         self._settings_panel.onboardingRequested.connect(self._start_onboarding)
         self._settings_panel.databaseChanged.connect(self._on_database_changed)
         self._settings_panel.settingsChanged.connect(self._on_settings_changed)
+        # 设置页只「请求落盘」，具体时机由这里统一去抖（拖数值控件时逐格触发）
+        self._settings_panel.persistRequested.connect(self._schedule_config_save)
 
         # 切页：进入「基础配色」时按需补算
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -389,6 +403,7 @@ class MainWindow(QMainWindow):
             copy_to_clipboard(sample.hex)
         self._request_compute(immediate=True)
         self._request_mix_compute()
+        self._request_plan_compute()
         if tuned and self._base_rgb is not None:
             self._update_status(
                 f"微调中 {sample.hex}（原始 #{self._base_rgb[0]:02X}{self._base_rgb[1]:02X}"
@@ -475,6 +490,8 @@ class MainWindow(QMainWindow):
         """切到「基础配色」页且已有吸色时，按需补算。"""
         if self._tabs.widget(index) is self._scheme_panel:
             self._request_mix_compute()
+        elif self._tabs.widget(index) is self._plan_panel:
+            self._request_plan_compute()
 
     def _on_mix_requested(self, total_drops: int) -> None:
         """面板改了总滴数或点了重算：记下来并重算（仅在该页可见时才会真正计算）。"""
@@ -505,7 +522,7 @@ class MainWindow(QMainWindow):
         scope = self._mix_brand_label()
         self._update_status(
             f"已取色 {self._sample.hex} · 基础配色：红/黄/蓝/白/黑五瓶调配"
-            f"（{scope} · 近似 ΔE {recipe.delta_e:.1f}）"
+            f"（{scope} · 近似 {format_delta_e(recipe.delta_e)}）"
         )
 
     def _on_mix_failed(self, message: str, token: int) -> None:
@@ -532,6 +549,55 @@ class MainWindow(QMainWindow):
             BRANDS[b].short for b in self._mix_brands if b in BRANDS
         ) or "混搭（全部品牌）"
 
+    # ================================================================== 配色方案
+    def _on_plan_requested(self, scheme_type: str, param: int) -> None:
+        """面板换了方案类型或色数：记下来（落盘）并立即重算。"""
+        self._config.scheme_type = scheme_type
+        self._config.scheme_param = int(param)
+        save_config(self._config)
+        self._request_plan_compute()
+
+    def _request_plan_compute(self) -> None:
+        """配色方案只在该页可见时计算，避免后台空转。
+
+        与「基础配色」页同理：切换页签时按需补算，取色时也顺手排一次队。
+        """
+        if self._sample is None:
+            self._plan_panel.show_empty()
+            return
+        if self._tabs.currentWidget() is not self._plan_panel:
+            return
+        self._plan_token += 1
+        token = self._plan_token
+        self._plan_panel.set_busy(True)
+        submit_plan(
+            self._matcher, self._sample.rgb, self._config, self._brand_filter,
+            self._coverage_panel.coverage_input(),
+            self._plan_panel.scheme_type(), self._plan_panel.param(),
+            token, self._on_plan_ready, self._on_plan_failed,
+        )
+
+    def _on_plan_ready(self, stops: list, token: int) -> None:
+        if token != self._plan_token:
+            return
+        self._plan_stops = stops
+        self._plan_panel.set_stops(stops)
+        matched = sum(1 for stop in stops if stop.suggestion is not None)
+        self._update_status(
+            f"已取色 {self._sample.hex} · 配色方案：{len(stops)} 个方案色，"
+            f"{matched} 个已落到真实漆"
+        )
+
+    def _on_plan_failed(self, message: str, token: int) -> None:
+        if token != self._plan_token:
+            return
+        self._plan_stops = []
+        self._plan_panel.set_busy(False)
+        self._plan_panel.show_empty(
+            "配色方案计算失败", f"{message}。可以重试，或在上方换个品牌范围。")
+        self._update_status(f"配色方案计算失败：{message}")
+        show_toast(self, f"配色方案计算失败：{message}", "error", 4200)
+
     def _render_suggestions(self) -> None:
         """把已算好的建议渲染到各面板（无重计算，主线程安全）。"""
         if not self._suggestions:
@@ -547,7 +613,7 @@ class MainWindow(QMainWindow):
         best = self._suggestions[0]
         self._pick_panel.set_delta_text(
             f"最接近：{best.anchor.full_label} {best.anchor.name} · "
-            f"ΔE {best.delta_e:.2f}（{grade_delta_e(best.delta_e).label}）"
+            f"{format_delta_e(best.delta_e)}（{grade_delta_e(best.delta_e).label}）"
         )
 
     # ================================================================== 复制/导出
@@ -581,73 +647,9 @@ class MainWindow(QMainWindow):
         copy_to_clipboard(entry.hex)
         show_toast(self, f"已复制 {entry.full_label} 色值 {entry.hex}", "info")
 
-    def _export_json(self) -> None:
-        self._save_text(self.export_report(), "配色建议.json", "JSON 文件 (*.json)")
-
-    def _export_markdown(self) -> None:
-        if self._sample is None:
-            show_toast(self, "还没有取色", "warn")
-            return
-        from ..services.export_service import suggestions_to_markdown
-
-        text = suggestions_to_markdown(self._suggestions, self._sample.rgb)
-        self._save_text(text, "配色建议.md", "Markdown 文件 (*.md)")
-
-    def _export_csv(self) -> None:
-        if self._sample is None:
-            show_toast(self, "还没有取色", "warn")
-            return
-        from ..services.export_service import suggestions_to_csv
-
-        text = suggestions_to_csv(self._suggestions, self._sample.rgb)
-        self._save_text(text, "配色建议.csv", "CSV 文件 (*.csv)")
-
     def _copy_share_text(self) -> None:
-        """一键把「目标色 + 前两套配比」复制成纯文本，便于发群/发帖。"""
-        if self._sample is None:
-            show_toast(self, "还没有取色", "warn")
-            return
-        from ..services.export_service import suggestions_to_share_text
-
-        text = suggestions_to_share_text(
-            self._suggestions, self._sample.rgb,
-            title=f"涂装配色：{self._sample.hex}",
-        )
-        if copy_to_clipboard(text):
-            show_toast(self, "分享文本已复制", "success")
-        else:
-            show_toast(self, "复制失败", "error")
-
-    def _save_text(self, text: str, default_name: str, pattern: str) -> None:
-        from PySide6.QtWidgets import QFileDialog
-
-        path, _ = QFileDialog.getSaveFileName(self, "导出", default_name, pattern)
-        if not path:
-            return
-        try:
-            with open(path, "w", encoding="utf-8") as fp:
-                fp.write(text)
-            show_toast(self, f"已导出到 {path}", "success")
-        except OSError as exc:
-            logger.error("导出失败: %s", exc)
-            show_toast(self, f"导出失败：{exc}", "error")
-
-    @staticmethod
-    def _show_about() -> None:
-        from PySide6.QtWidgets import QMessageBox
-
-        from .. import __version__
-        from ..data.paint_db import get_database
-
-        db = get_database()
-        QMessageBox.information(
-            None, "关于",
-            f"ModelPaintPal v{__version__}\n\n"
-            f"3D 打印模型涂装配色助手\n"
-            f"色号库：{len(db)} 条 / {len(db.brands)} 个品牌\n\n"
-            "色值为基于官方色卡的屏幕近似值，用于相对匹配与配比估算；\n"
-            "正式喷涂前请务必小量试喷确认。",
-        )
+        """保留这个入口：菜单已改接 ``ui.actions``，但它是窗口上的稳定调用点。"""
+        actions.copy_share_text(self)
 
     # ================================================================== 校准
     def _on_calibrate_requested(self, suggestion) -> None:
@@ -772,6 +774,7 @@ class MainWindow(QMainWindow):
         save_config(self._config)
         self._request_compute(immediate=True)
         self._request_mix_compute()
+        self._request_plan_compute()
         scope = "全部品牌" if not brands else f"{len(brands)} 个品牌"
         self._update_status(f"建议范围已切换为{scope}")
 
@@ -782,14 +785,50 @@ class MainWindow(QMainWindow):
 
     def _on_settings_changed(self) -> None:
         """设置页改了容差/条数/模型等：立刻重算，避免"改完没生效"。"""
+        self._resync_panels()
         self._request_compute(immediate=True)
         self._request_mix_compute()
-        self._update_status("设置已保存，配色建议已重新计算")
+        self._request_plan_compute()
+        self._update_status("设置已更新，配色建议已重新计算")
+
+    def _resync_panels(self) -> None:
+        """把依赖配置的面板重新对齐。
+
+        此前这里只重算建议，于是「恢复默认设置」之后：建议页仍用着旧的品牌范围、
+        基础配色页的总滴数还是旧值、配色方案页没回到「基础色盘」、历史/收藏上限
+        也没生效——配置改了，界面还停在旧状态，用户只能重启。
+        """
+        brands = list(self._config.preferred_brands)
+        if brands != self._brand_filter:
+            self._brand_filter = brands
+        self._mix_brands = list(self._config.mix_brands)
+        self._total_drops = int(self._config.drop_total)
+        self._suggest_panel.sync_settings(brands, self._config.delta_e_formula)
+        self._scheme_panel.set_brand(self._mix_brands)
+        self._scheme_panel.set_total_drops(self._total_drops)
+        self._plan_panel.set_scheme(self._config.scheme_type, self._config.scheme_param)
+        self._refresh_library()
 
     def _on_coverage_changed(self) -> None:
-        save_config(self._config)
+        # 落盘去抖，但重算立刻排队：用户看到的结果不必等磁盘写完
+        self._schedule_config_save()
         self._request_compute(immediate=False)
         self._request_mix_compute()
+        self._request_plan_compute()
+
+    # ================================================================== 落盘
+    def _schedule_config_save(self) -> None:
+        """把配置落盘推迟到用户停手之后。
+
+        连续拖动数值控件时只在最后一次写盘；窗口关闭前会强制 flush，
+        不会丢配置。
+        """
+        self._save_timer.start()
+
+    def _flush_config(self) -> None:
+        """立即落盘（关闭窗口、离散操作时用）。"""
+        self._save_timer.stop()
+        save_config(self._config)
 
     # ================================================================== 热键
     def _apply_hotkeys(self) -> None:
@@ -835,6 +874,16 @@ class MainWindow(QMainWindow):
     def _update_status(self, message: str) -> None:
         self.statusBar().showMessage(message, 6000)
 
+    @property
+    def sample(self) -> Optional[ColorSample]:
+        """当前取色样本（None 表示还没取过色）。"""
+        return self._sample
+
+    @property
+    def suggestions(self) -> list:
+        """当前建议列表（只读，供导出等叶子动作使用）。"""
+        return self._suggestions
+
     def export_report(self) -> str:
         """导出当前建议为 JSON（供菜单/自动化测试使用）。"""
         if self._sample is None:
@@ -854,7 +903,9 @@ class MainWindow(QMainWindow):
         # 先作废在途的异步计算：把 token 推到新值，之后任何迟到的结果都会被
         # ``_on_suggest_ready`` 丢掉，避免向正在销毁的窗口投递信号。
         self._suggest_token += 1
+        self._plan_token += 1
         self._compute_timer.stop()
+        self._save_timer.stop()   # 下面会显式保存窗口尺寸，不需要再排一次
         self._config.window_width = self.width()
         self._config.window_height = self.height()
         save_config(self._config)

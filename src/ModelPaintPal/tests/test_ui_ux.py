@@ -310,8 +310,12 @@ class TestTabShortcuts(_WindowCase):
             menu = action.menu()
             if menu is not None and action.text() == "视图":
                 actions = [a.shortcut().toString() for a in menu.actions()]
-        # 每个页签都有 Ctrl+N 快捷切换；新增「基础配色」后共 5 个页签
-        self.assertEqual(actions, ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5"])
+        # 每个页签都有 Ctrl+N 快捷切换。断言按页签数推导而不是写死 5 个：
+        # 写死的话每加一个页签就要改一次测试，而这条测试真正要保证的是
+        # 「页签数与快捷键数一一对应、且从 1 开始连续」。
+        expected = [f"Ctrl+{i}" for i in range(1, self.window._tabs.count() + 1)]
+        self.assertEqual(actions, expected)
+        self.assertGreaterEqual(len(expected), 5)
 
 
 class TestToastStack(_WindowCase):

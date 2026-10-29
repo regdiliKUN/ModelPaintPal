@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .logging_setup import get_logger
-from .sample_record import SampleRecord, record_from_dict
+from .sample_record import SampleRecord, record_or_none
 from .storage import CollectionStore
 
 logger = get_logger(__name__)
@@ -32,10 +32,12 @@ class FavoritesStore:
     def all(self) -> List[SampleRecord]:
         records: List[SampleRecord] = []
         for item in self._store.load():
-            try:
-                records.append(record_from_dict(item))
-            except Exception:  # 单条脏数据不应拖累整个收藏夹
+            # 同历史记录：还原不出颜色的条目直接丢，别显示成纯黑色块
+            record = record_or_none(item)
+            if record is None:
                 logger.warning("忽略一条无法解析的收藏记录: %r", item)
+                continue
+            records.append(record)
         return sorted(records, key=lambda rec: rec.name or rec.hex)
 
     def contains_hex(self, hex_value: str) -> bool:

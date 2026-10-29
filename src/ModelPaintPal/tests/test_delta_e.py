@@ -11,7 +11,8 @@ import math
 import unittest
 
 from app.core.delta_e import (delta_e, delta_e_2000, delta_e_76, delta_e_94,
-                             delta_e_cmc, grade_delta_e, resolve_delta_e)
+                             delta_e_cmc, grade_delta_e, resolve_delta_e,
+                             sl_scale_max)
 
 
 def _reference_ciede2000(lab1, lab2):
@@ -231,6 +232,70 @@ class DeltaEDispatchContractTest(unittest.TestCase):
         # 其它色值应按数值单调（颜色越偏、标签越“严重”）
         grades = [grade_delta_e(v).value for v in (0.5, 2.5, 4.0, 7.0)]
         self.assertEqual(grades, sorted(grades))
+
+
+class LightnessLowerBoundTest(unittest.TestCase):
+    """亮度下界 ``ΔE ≥ |ΔL| / S_L,max``。
+
+    替代色检索用它做剪枝（``alternatives._nearest``）：亮度差已经超容差的候选
+    直接跳过。这条**必须是严格下界**，否则会漏掉合格的替代色号——那是「说没有
+    替代品，其实有」，比慢一点严重得多。
+    """
+
+    def test_scale_bound_values(self):
+        self.assertAlmostEqual(sl_scale_max("CIEDE2000"), 1.747, places=3)
+        self.assertAlmostEqual(sl_scale_max("CIE76"), 1.0, places=6)
+        self.assertAlmostEqual(sl_scale_max("CIE94"), 1.0, places=6)
+        self.assertAlmostEqual(sl_scale_max("CMC"), 1.5, places=6)
+        # 未知识别名回落到 CIEDE2000 的界，宁可少剪也不多剪
+        self.assertAlmostEqual(sl_scale_max("???"), 1.747, places=3)
+        # 也可以直接传已解析的函数对象
+        self.assertAlmostEqual(sl_scale_max(resolve_delta_e("CIE76")), 1.0, places=6)
+
+    def test_bound_holds_for_every_formula(self):
+        """在真实色号库上穷举验证：不存在违反下界的组合。"""
+        from app.data.paint_db import get_database
+
+        entries = get_database().entries
+        targets = [entry.lab for entry in entries[::37]] + [
+            (0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (50.0, -60.0, 40.0),
+        ]
+        for formula in ("CIEDE2000", "CIE76", "CIE94", "CMC"):
+            de_fn = resolve_delta_e(formula)
+            sl_max = sl_scale_max(de_fn)
+            for target in targets:
+                for entry in entries:
+                    value = de_fn(entry.lab, target)
+                    bound = abs(entry.lab[0] - target[0]) / sl_max
+                    self.assertGreaterEqual(
+                        value + 1e-9, bound,
+                        f"{formula} 违反亮度下界：{entry.uid} vs {target}")
+
+    def test_nearest_pruning_keeps_every_qualifying_candidate(self):
+        """剪枝前后结果必须逐位相同（与不剪枝的暴力实现对照）。"""
+        from app.data.paint_db import get_database
+        from app.services.alternatives import _nearest
+
+        db = get_database()
+        entries = db.entries
+        for formula in ("CIEDE2000", "CIE76", "CMC"):
+            de_fn = resolve_delta_e(formula)
+            for reference in entries[::53]:
+                for tolerance in (1.0, 3.0, 6.0):
+                    expected = [
+                        (de_fn(reference.lab, cand.lab), cand.uid)
+                        for cand in entries
+                        if cand.uid != reference.uid
+                        and cand.brand_key != reference.brand_key
+                        and de_fn(reference.lab, cand.lab) <= tolerance
+                    ]
+                    expected.sort(key=lambda item: item[0])
+                    expected = expected[:4]
+                    got = _nearest(reference, entries, {reference.uid}, False,
+                                   de_fn, sl_scale_max(de_fn), tolerance, 4)
+                    self.assertEqual([uid for _, uid in expected],
+                                     [cand.uid for _, cand in got],
+                                     f"{formula} / 容差 {tolerance} / {reference.uid} 剪枝漏了候选")
 
 
 if __name__ == "__main__":

@@ -156,6 +156,29 @@ class TestProvenanceSummary(unittest.TestCase):
         self.assertEqual(prov.refs, [])
         self.assertFalse(prov.has_refs)
 
+    def test_dirty_source_does_not_leave_a_number_gap(self):
+        """引用到注册表里不存在的来源时，编号必须仍然连续、且不指向空号。
+
+        此前用 ``enumerate(source_ids)`` 发号、再用 ``source_ids.index(sid) + 1``
+        反查，跳过脏数据后编号会留下空号（界面出现 [1] [3] 找不到 [2]），
+        被跳过的色号还会被指到一个根本不存在的编号上。
+        """
+        entries = [
+            _entry("a:1", src_kind="chart", src_ref="S:paint-vault"),
+            _entry("b:1", src_kind="official", src_ref="S:not-registered"),
+            _entry("c:1", src_kind="retail", src_ref="S:tamiya-official"),
+        ]
+        prov = build_provenance(entries)
+        self.assertEqual([r.index for r in prov.refs], [1, 2])
+        self.assertEqual([r.source_id for r in prov.refs],
+                         ["S:tamiya-official", "S:paint-vault"])
+        # 脏数据那一条不参与编号，也不该拿到角标
+        self.assertEqual(prov.cite_of("b:1"), "")
+        # 有效色号的角标必须落在真实存在的 refs 上
+        indexes = {r.index for r in prov.refs}
+        for uid in ("a:1", "c:1"):
+            self.assertIn(int(prov.cite_of(uid)), indexes)
+
     def test_stale_is_reported(self):
         entry = _entry("a:1", src_kind="official",
                        src_ref="S:tamiya-official", src_date="2021-01")

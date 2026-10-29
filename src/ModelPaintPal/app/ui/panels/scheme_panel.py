@@ -16,19 +16,20 @@ from __future__ import annotations
 from typing import List, Sequence
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy,
     QSpinBox, QVBoxLayout, QWidget,
 )
 
-from ...core.color_models import normalize_rgb, rgb_to_hex
+from ...core.color_models import rgb_to_hex
+from ...core.delta_e import format_delta_e
 from ...data.brands import BRANDS, brand_keys
 from ...services.paint_matcher import PaintSuggestion
 from ...services.scheme_engine import MixRecipe
-from ..theme import Palette
 from ..widgets.ratio_bar import RatioBarCard, RatioSegment
 from ..widgets.empty_state import EmptyState
+from ..widgets.swatch import color_swatch as _swatch, paint_swatch
+from ..widgets.status_line import StatusLine
 
 __all__ = ["SchemePanel", "SCHEME_TAB_TITLE"]
 
@@ -38,17 +39,6 @@ _EMPTY_TITLE = "还没有取样"
 _EMPTY_DESC = ("点击左侧「开始吸色」，或按全局快捷键从任意窗口/图片上取一个颜色。"
                "取色后这里会把它分解成一瓶红、一瓶黄、一瓶蓝、一瓶白、一瓶黑"
                "的调配比例（同一条混色条 + 各占百分之多少 + 各几滴）。")
-
-
-def _swatch(rgb: Sequence[int], size: int = 18) -> QLabel:
-    """一个纯色方块（不带文字）。"""
-    r, g, b = normalize_rgb(rgb)
-    lab = QLabel()
-    lab.setFixedSize(size, size)
-    lab.setStyleSheet(
-        f"background:{QColor(r, g, b).name()};"
-        f"border:1px solid {Palette.border_strong};border-radius:3px;")
-    return lab
 
 
 class _MixRow(QFrame):
@@ -80,10 +70,7 @@ class _MixRow(QFrame):
         row.addWidget(self._rec, 1)
 
     def set_component(self, comp, total_drops: int) -> None:
-        r, g, b = normalize_rgb(comp.base_rgb)
-        self._swatch.setStyleSheet(
-            f"background:{QColor(r, g, b).name()};"
-            f"border:1px solid {Palette.border_strong};border-radius:3px;")
+        paint_swatch(self._swatch, comp.base_rgb)
         self._role.setText(comp.role)
         pct = comp.drops / total_drops * 100.0 if total_drops else 0.0
         self._ratio.setText(f"占 {pct:.0f}%  ·  {comp.drops} 滴")
@@ -92,7 +79,7 @@ class _MixRow(QFrame):
         if sug is not None:
             a = sug.anchor
             self._rec.setText(
-                f"推荐真实漆：{a.brand_label} {a.code} {a.name} · ΔE {sug.delta_e:.2f}")
+                f"推荐真实漆：{a.brand_label} {a.code} {a.name} · {format_delta_e(sug.delta_e)}")
         else:
             self._rec.setText("推荐真实漆：当前品牌范围内暂无匹配")
 
@@ -139,7 +126,6 @@ class SchemePanel(QFrame):
 
         self._build_body()
         self._total_drops = 20
-        self._busy = False
 
     # ------------------------------------------------------------------ 工具条
     def _build_toolbar(self) -> QFrame:
@@ -185,8 +171,7 @@ class SchemePanel(QFrame):
 
         row.addStretch(1)
 
-        self._count_label = QLabel("")
-        self._count_label.setObjectName("FaintLabel")
+        self._count_label = StatusLine()
         row.addWidget(self._count_label)
         return bar
 
@@ -212,7 +197,11 @@ class SchemePanel(QFrame):
             target = brands[0]
         idx = self._brand_combo.findData(target)
         if idx >= 0:
+            # 程序化回填不能触发 brandChanged：否则「恢复默认」会被当成用户手动换品牌，
+            # 白白多写一次盘、多算一次配方
+            self._brand_combo.blockSignals(True)
             self._brand_combo.setCurrentIndex(idx)
+            self._brand_combo.blockSignals(False)
 
     # ------------------------------------------------------------------ 主体
     def _build_body(self) -> None:
@@ -267,17 +256,11 @@ class SchemePanel(QFrame):
         self._scroll.setVisible(True)
         self.set_busy(False)
 
-        t_r, t_g, t_b = normalize_rgb(target_rgb)
-        self._target_swatch.setStyleSheet(
-            f"background:{QColor(t_r, t_g, t_b).name()};"
-            f"border:1px solid {Palette.border_strong};border-radius:3px;")
+        paint_swatch(self._target_swatch, target_rgb)
         self._target_label.setText(f"目标 {rgb_to_hex(target_rgb)}")
-        p_r, p_g, p_b = normalize_rgb(recipe.predicted_rgb)
-        self._pred_swatch.setStyleSheet(
-            f"background:{QColor(p_r, p_g, p_b).name()};"
-            f"border:1px solid {Palette.border_strong};border-radius:3px;")
+        paint_swatch(self._pred_swatch, recipe.predicted_rgb)
         self._pred_label.setText(f"近似 {rgb_to_hex(recipe.predicted_rgb)}")
-        self._de_label.setText(f"色差 ΔE {recipe.delta_e:.1f}（五瓶内最接近）")
+        self._de_label.setText(f"色差 {format_delta_e(recipe.delta_e)}（五瓶内最接近）")
 
         segments = []
         for comp in recipe.components:
@@ -290,23 +273,16 @@ class SchemePanel(QFrame):
         self._bar.set_segments(
             segments,
             legend=f"总滴数 {recipe.total_drops} · 按配比调匀即得近似色"
-                   f"（ΔE {recipe.delta_e:.1f}）")
+                   f"（{format_delta_e(recipe.delta_e)}）")
 
         for row, comp in zip(self._rows, recipe.components):
             row.setVisible(True)
             row.set_component(comp, recipe.total_drops)
 
-        self._count_label.setText("红/黄/蓝/白/黑 五瓶基础漆")
+        self._count_label.set_idle("红/黄/蓝/白/黑 五瓶基础漆")
 
     def set_busy(self, busy: bool) -> None:
-        self._busy = busy
-        if busy:
-            self._count_label.setText("计算中…")
-            self._count_label.setStyleSheet(
-                f"color: {Palette.highlight}; background: transparent;")
-        else:
-            self._count_label.setStyleSheet(
-                f"color: {Palette.text_faint}; background: transparent;")
+        self._count_label.set_busy(busy)
 
     def set_initial_type(self, scheme_type: str) -> None:
         """兼容主窗口启动时调用（本页已无方案类型下拉，留作空操作）。"""
@@ -326,4 +302,4 @@ class SchemePanel(QFrame):
         self._empty.set_text(title, description)
         self._empty.setVisible(True)
         self._scroll.setVisible(False)
-        self._count_label.setText("")
+        self._count_label.clear_text()

@@ -3,7 +3,7 @@
 ; 需要安装 Inno Setup 6：https://jrsoftware.org/isinfo.php
 
 #define MyAppName "ModelPaintPal"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.2.0"   ; 必须与 app/__init__.py 的 __version__ 一致（tests/test_meta.py 会校验）
 #define MyAppPublisher "ModelPaintPal"
 #define MyAppURL "https://github.com/"
 #define MyAppExeName "ModelPaintPal.exe"

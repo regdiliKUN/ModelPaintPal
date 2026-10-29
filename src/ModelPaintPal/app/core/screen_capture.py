@@ -103,8 +103,8 @@ class ScreenCapture:
         if self._sct is not None:
             try:
                 self._sct.close()
-            except Exception:  # pragma: no cover
-                pass
+            except Exception as exc:  # pragma: no cover - 关闭失败不影响退出
+                logger.debug("关闭 mss 抓屏后端失败（忽略）: %s", exc)
             self._sct = None
 
     def __enter__(self) -> "ScreenCapture":
@@ -153,7 +153,7 @@ class ScreenCapture:
         return False
 
     # ---------------------------------------------------------------- 抓图
-    def grab(self, left: int, top: int, width: int, height: int):
+    def grab(self, left: int, top: int, width: int, height: int) -> "Image.Image":
         """抓取指定矩形，返回 PIL.Image（RGB）。宽度/高度至少为 1。"""
         width = max(1, int(width))
         height = max(1, int(height))
@@ -178,7 +178,7 @@ class ScreenCapture:
         img = self.grab(int(x), int(y), 1, 1)
         return img.getpixel((0, 0))[:3]
 
-    def region(self, x: int, y: int, size: int):
+    def region(self, x: int, y: int, size: int) -> Tuple["Image.Image", int, int]:
         """以 (x, y) 为中心抓取 size×size 的区域。
 
         返回 ``(image, left, top)``，其中 ``left/top`` 为真实抓图的左上角坐标

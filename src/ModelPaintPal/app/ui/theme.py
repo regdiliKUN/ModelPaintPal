@@ -10,6 +10,10 @@ from typing import Tuple
 
 from PySide6.QtGui import QColor, QFont
 
+from ..core.logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 __all__ = [
     "Palette",
     "stylesheet",
@@ -42,7 +46,8 @@ def _pick_family(candidates, fallback: str = "") -> str:
         from PySide6.QtGui import QFontDatabase
 
         available = set(QFontDatabase.families())
-    except Exception:  # pragma: no cover - 字体子系统不可用时交回 Qt 默认
+    except Exception as exc:  # pragma: no cover - 字体子系统不可用时交回 Qt 默认
+        logger.debug("字体列表探测失败，使用回退字体: %s", exc)
         return fallback
     if not available:
         return fallback

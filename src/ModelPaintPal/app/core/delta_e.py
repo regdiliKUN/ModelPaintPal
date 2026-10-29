@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence
 
 from .color_models import rgb_to_lab
 
@@ -17,11 +17,13 @@ __all__ = [
     "DeltaEFormula",
     "delta_e",
     "resolve_delta_e",
+    "sl_scale_max",
     "delta_e_76",
     "delta_e_94",
     "delta_e_2000",
     "delta_e_cmc",
     "grade_delta_e",
+    "format_delta_e",
     "DELTA_E_GRADES",
 ]
 
@@ -175,7 +177,7 @@ def delta_e(lab1: Sequence[float], lab2: Sequence[float], formula: DeltaEFormula
     return resolve_delta_e(formula)(lab1, lab2)
 
 
-def resolve_delta_e(formula: DeltaEFormula = "CIEDE2000"):
+def resolve_delta_e(formula: DeltaEFormula = "CIEDE2000") -> Callable:
     """把公式名解析成具体函数，供高频搜索路径**复用**。
 
     配方搜索里同一个公式会被调用十几万次；原实现每次调用都做一遍
@@ -184,6 +186,30 @@ def resolve_delta_e(formula: DeltaEFormula = "CIEDE2000"):
     """
     key = (formula or "CIEDE2000").upper().replace("ΔE", "").replace("DE", "")
     return _DISPATCH.get(key, delta_e_2000)
+
+
+#: 各公式里亮度权重 S_L 在 L* ∈ [0, 100] 上的**上界**。
+#:
+#: 推导（CIEDE2000）：ΔE00² = (ΔL'/S_L)² + (ΔC'/S_C)² + (ΔH'/S_H)² + R_T·(...)，
+#: 后三项的交叉项满足 x² + y² + R_T·x·y ≥ (x−y)² ≥ 0（因 |R_T| ≤ 2），故
+#: ``ΔE00 ≥ |ΔL'| / S_L``，而 S_L = 1 + 0.015·(L̄−50)²/√(20+(L̄−50)²) 在
+#: L̄ ∈ [0,100] 上最大约 1.747（L̄=0 或 100 时）。取 1.747 作上界即可。
+#: CIE76 / CIE94 的 S_L 恒为 1；CMC 的 s_l 在 L*=100 处约 1.482，取 1.5 留余量。
+#:
+#: 用途：``|ΔL| / S_L,max > 阈值`` 的候选**必然**超过阈值，可以不算完整 ΔE 直接
+#: 排除。这是严格下界，不会漏掉任何合格候选（见 tests/test_delta_e.py）。
+_SL_SCALE_MAX = {
+    delta_e_2000: 1.747,
+    delta_e_76: 1.0,
+    delta_e_94: 1.0,
+    delta_e_cmc: 1.5,
+}
+
+
+def sl_scale_max(formula_or_fn=delta_e_2000) -> float:
+    """返回该公式下 S_L 的上界；入参可以是公式名，也可以是已解析的函数。"""
+    fn = formula_or_fn if callable(formula_or_fn) else resolve_delta_e(formula_or_fn)
+    return _SL_SCALE_MAX.get(fn, 1.747)
 
 
 _DISPATCH: dict = {
@@ -219,6 +245,16 @@ class DeltaEGrade:
 
     def as_text(self) -> str:
         return f"ΔE {self.value:.2f} · {self.label}"
+
+
+def format_delta_e(value: float, digits: int = 2) -> str:
+    """统一的 ΔE 文案：``ΔE 2.96``。
+
+    色差数值在界面上会同时出现在卡片角标、状态栏、分享文本、导出表格里。
+    只要有一处用了不同的位数，用户就会把它当成两次不同的计算——「卡片写 2.96、
+    分享文本写 3.0」正是这类让人怀疑数据的细节。集中在这里，改口径只改一处。
+    """
+    return f"ΔE {float(value):.{digits}f}"
 
 
 def grade_delta_e(value: float) -> DeltaEGrade:

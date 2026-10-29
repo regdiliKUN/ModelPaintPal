@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (
 from ...core.delta_e import available_formulas
 from ...data.brands import BRANDS, brand_keys
 from ...services.paint_matcher import PaintSuggestion
-from ..theme import Palette
 from ..widgets.empty_state import EmptyState
+from ..widgets.status_line import StatusLine
 from .suggestion_card import SuggestionCard
 
 __all__ = ["SuggestPanel"]
@@ -64,7 +64,6 @@ class SuggestPanel(QFrame):
         self._scroll.setVisible(False)
 
         self._cards: List[SuggestionCard] = []
-        self._busy = False
 
     # ------------------------------------------------------------------ 工具条
     def _build_toolbar(self) -> QFrame:
@@ -104,8 +103,7 @@ class SuggestPanel(QFrame):
 
         row.addStretch(1)
 
-        self._count_label = QLabel("")
-        self._count_label.setObjectName("FaintLabel")
+        self._count_label = StatusLine()
         row.addWidget(self._count_label)
         return bar
 
@@ -124,8 +122,7 @@ class SuggestPanel(QFrame):
         for card, suggestion in zip(self._cards, suggestions):
             card.set_suggestion(suggestion, target_rgb)
             card.setVisible(True)
-        self.set_busy(False)
-        self._count_label.setText(f"{len(suggestions)} 条建议 · 色号库 {self._db_hint()}")
+        self._count_label.set_idle(f"{len(suggestions)} 条建议 · 色号库 {self._db_hint()}")
 
     def _ensure_cards(self, count: int) -> None:
         """卡片池：连续吸色时建议条数通常不变，复用已有卡片而不是全量重建。
@@ -144,13 +141,7 @@ class SuggestPanel(QFrame):
 
     def set_busy(self, busy: bool) -> None:
         """计算中状态：不清空已有结果，只在计数位提示，避免界面闪烁。"""
-        self._busy = busy
-        if busy:
-            self._count_label.setText("计算中…")
-            self._count_label.setStyleSheet(f"color: {Palette.highlight}; background: transparent;")
-        else:
-            self._count_label.setStyleSheet(
-                f"color: {Palette.text_faint}; background: transparent;")
+        self._count_label.set_busy(busy)
 
     def _db_hint(self) -> str:
         from ...data.paint_db import get_database
@@ -165,7 +156,7 @@ class SuggestPanel(QFrame):
         self._empty.set_text(title, description)
         self._empty.setVisible(True)
         self._scroll.setVisible(False)
-        self._count_label.setText("")
+        self._count_label.clear_text()
 
     def _hide_cards(self) -> None:
         for card in self._cards:

@@ -16,11 +16,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QSizePolicy, QVBoxLayout
 
 from ...core.color_models import contrast_text_color, normalize_rgb, rgb_to_hex
+from ...core.delta_e import format_delta_e
 from ..paint import painter_on
 from ..theme import font
 
@@ -79,7 +80,7 @@ class _Swatch(QFrame):
         self._title = f"{index_badge(item.index)} {title}" if item.index else title
         self.setToolTip(
             f"{item.title}\n{item.subtitle}\n{item.hex}"
-            + (f"\nΔE {item.delta_e:.2f}" if item.delta_e is not None else "")
+            + (f"\n{format_delta_e(item.delta_e)}" if item.delta_e is not None else "")
             + ("\n点击复制色值" if item.uid else "")
         )
 
@@ -93,7 +94,7 @@ class _Swatch(QFrame):
         self._title = f"{index_badge(item.index)} {title}" if item.index else title
         self.setToolTip(
             f"{item.title}\n{item.subtitle}\n{item.hex}"
-            + (f"\nΔE {item.delta_e:.2f}" if item.delta_e is not None else "")
+            + (f"\n{format_delta_e(item.delta_e)}" if item.delta_e is not None else "")
             + ("\n点击复制色值" if item.uid else "")
         )
         self.update()
@@ -131,7 +132,7 @@ class _Swatch(QFrame):
 
         # ΔE 角标：单独占顶部一条带，不与文字抢位置
         if self._item.delta_e is not None:
-            text = f"ΔE {self._item.delta_e:.2f}"
+            text = format_delta_e(self._item.delta_e)
             painter.setFont(font(7, bold=True))
             metrics = painter.fontMetrics()
             width = metrics.horizontalAdvance(text) + 10
@@ -206,7 +207,7 @@ class SwatchStrip(QFrame):
             self._grid.addWidget(swatch, position // self._columns,
                                  position % self._columns)
 
-    def sizeHint(self):  # noqa: N802
+    def sizeHint(self) -> QSize:  # noqa: N802
         hint = super().sizeHint()
         rows = max(1, (len(self._items) + max(1, self._columns) - 1)
                    // max(1, self._columns))

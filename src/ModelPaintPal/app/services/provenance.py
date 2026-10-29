@@ -117,6 +117,42 @@ class ProvenanceSummary:
         }
 
 
+def _build_refs(items: Sequence[PaintEntry],
+                source_ids: Sequence[str]) -> tuple:
+    """按已排好的来源顺序生成引用列表。
+
+    返回 ``(refs, number_of)``。编号在**成功解析的 refs 上连续**：脏数据（引用了
+    注册表里不存在的来源）会被跳过，若沿用 source_ids 的下标就会留下空号，界面上
+    出现「[1] [3]」却找不到 [2]，而 index_of 还会把色号指到不存在的编号上。
+    """
+    refs: List[ProvenanceRef] = []
+    number_of: Dict[str, int] = {}
+    for sid in source_ids:
+        source = get_source(sid)
+        if source is None:
+            # 理论上到不了这里：check_paint_db 会拦住不存在的引用。
+            # 但运行期不该因为脏数据崩掉，跳过即可（宁可少一个角标）。
+            continue
+        number = len(refs) + 1
+        number_of[sid] = number
+        refs.append(ProvenanceRef(
+            index=number,
+            source_id=sid,
+            name=source.name,
+            url=source.url,
+            kind=source.kind,
+            kind_label=kind_label(source.kind),
+            date=source.accessed,
+            confidence=round(
+                min((e.confidence or 0.0) for e in items
+                    if e.src_ref == sid), 2),
+            is_fact=is_fact_kind(source.kind),
+            stale=source.accessed and any(
+                e.is_stale for e in items if e.src_ref == sid),
+        ))
+    return refs, number_of
+
+
 def build_provenance(entries: Iterable[Optional[PaintEntry]]) -> ProvenanceSummary:
     """把若干色号的来源聚合成一份带编号的溯源总览。
 
@@ -142,32 +178,12 @@ def build_provenance(entries: Iterable[Optional[PaintEntry]]) -> ProvenanceSumma
         sid,
     ))
 
-    refs: List[ProvenanceRef] = []
+    refs, number_of = _build_refs(items, source_ids)
     index_of: Dict[str, int] = {}
-    for number, sid in enumerate(source_ids, start=1):
-        source = get_source(sid)
-        if source is None:
-            # 理论上到不了这里：check_paint_db 会拦住不存在的引用。
-            # 但运行期不该因为脏数据崩掉，跳过即可（宁可少一个角标）。
-            continue
-        refs.append(ProvenanceRef(
-            index=number,
-            source_id=sid,
-            name=source.name,
-            url=source.url,
-            kind=source.kind,
-            kind_label=kind_label(source.kind),
-            date=source.accessed,
-            confidence=round(
-                min((e.confidence or 0.0) for e in items
-                    if e.src_ref == sid), 2),
-            is_fact=is_fact_kind(source.kind),
-            stale=source.accessed and any(
-                e.is_stale for e in items if e.src_ref == sid),
-        ))
     for uid, sid in pair_map.items():
-        if sid in source_ids:
-            index_of[uid] = source_ids.index(sid) + 1
+        number = number_of.get(sid)
+        if number:
+            index_of[uid] = number
 
     confidences = [float(e.confidence or 0.0) for e in items]
     unannotated = sum(1 for e in items if not e.is_annotated)

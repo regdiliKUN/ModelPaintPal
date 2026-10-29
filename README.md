@@ -2,16 +2,19 @@
 
 Windows 模型涂装配色助手：屏幕取色、模型漆匹配、可执行滴数配方与用量估算。
 
-当前版本 **1.1.0**（2026-10-25）。
+当前版本 **1.2.0**（2026-10-29）。
 
-- [下载便携版和源码](https://github.com/regdiliKUN/ModelPaintPal/releases/tag/v1.1.0)
+- [下载便携版和源码](https://github.com/regdiliKUN/ModelPaintPal/releases)
 - [源码与开发说明](src/ModelPaintPal/README.md)
-- [本轮优化及限制](src/ModelPaintPal/docs/OPTIMIZATION_2026-10-25.md)
+- [迭代记录（43 轮）](src/ModelPaintPal/docs/ITERATION_2026-10-29.md)
+- [性能优化说明](src/ModelPaintPal/docs/OPTIMIZATION_2026-10-29.md)
+- [1.1.0 更新说明](src/ModelPaintPal/docs/OPTIMIZATION_2026-10-25.md)
 - [新版完整发布目录](release/2026.10.25/ModelPaintPal-1.1.0-win-x64/)
 - [安卓版（源码与安装包，独立仓库）](https://github.com/regdiliKUN/ModelPaintPal-APK)
 
-本轮修复配方滴数与比例不同步、单色提示冲突、建议排序、跨产品线混配、用量口径、冻结包Qt依赖和热键线程生命周期。
-数字色卡与混色仍是近似预测，正式涂装前请先试喷。
+本轮把配色搜索提速 **9.7×**（配方结果逐位不变）、补上此前没有界面入口的「配色方案」
+页（互补 / 三角 / 邻近 / 单色系等 7 种）、连续吸色时排队中的陈旧计算直接放弃，并修掉
+一批边界与一致性问题。数字色卡与混色仍是近似预测，正式涂装前请先试喷。
 
 ## 开发
 
